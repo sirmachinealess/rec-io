@@ -1,0 +1,54 @@
+{
+  "name": "rec-io",
+  "productName": "rec.io",
+  "version": "1.5.1",
+  "private": true,
+  "description": "Offline meeting recorder: local transcription (whisper.cpp) and structured summaries (llama.cpp)",
+  "author": "Felipe Silva",
+  "license": "MIT",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "setup-local": "node scripts/setup-local.mjs",
+    "start": "electron .",
+    "test": "node --test \"test/*.test.mjs\"",
+    "dist": "node scripts/make-icon.mjs && node scripts/stage-engine.mjs && electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "44.9.2",
+    "electron-builder": "26.17.0"
+  },
+  "build": {
+    "appId": "local.felipe.rec-io",
+    "productName": "rec.io",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/engine",
+        "to": "local"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "rec.io",
+      "artifactName": "rec.io-Setup-${version}.exe",
+      "deleteAppDataOnUninstall": false
+    },
+    "compression": "normal"
+  }
+}
