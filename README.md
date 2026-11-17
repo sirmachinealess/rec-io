@@ -1,5 +1,8 @@
 # rec.io
 
+[![tests](https://github.com/sirmachinealess/rec-io/actions/workflows/test.yml/badge.svg)](https://github.com/sirmachinealess/rec-io/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **An offline meeting recorder for Windows.** It transcribes your calls live and writes a structured summary (decisions, action items, open questions) when you stop. Everything runs on your own PC: no account, no API key, and no audio or text ever leaves the machine.
 
 ![rec.io demo](docs/demo.gif)
