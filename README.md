@@ -7,6 +7,8 @@
 
 ![rec.io demo](docs/demo.gif)
 
+**At a glance:** Windows 10/11 · NVIDIA GPU with **6 GB VRAM minimum, 8 GB recommended** · ~1 GB VRAM while recording, ~4.4 GB peak for a few seconds while the summary is written (the summary model is unloaded afterwards) · ~330 ms per speech segment on an RTX 2060 SUPER · ~5 GB disk for engines and models. Measured on an RTX 2060 SUPER (8 GB); CPU-only works with a smaller Whisper model but is too slow for live use.
+
 > Works with Zoom, Teams, Meet or any other call app. rec.io records the computer's sound and your microphone; nothing joins the call.
 
 ## Why I built it
@@ -60,7 +62,7 @@ The only network access is the one-time model download, and only when you start 
 ## Requirements
 
 - Windows 10 or 11 (system audio is captured through WASAPI loopback)
-- An NVIDIA GPU is strongly recommended. On CPU only, use a smaller Whisper model (see below).
+- An NVIDIA GPU with at least 6 GB VRAM (8 GB recommended). rec.io uses about 1 GB while recording and peaks at about 4.4 GB for a few seconds while writing the summary. On CPU only, use a smaller Whisper model (see below).
 - About 5 GB of free disk space for the engines and models
 - Microsoft Visual C++ 2015–2022 runtime (already present on most PCs)
 - Node.js (current LTS) and npm to build from source
