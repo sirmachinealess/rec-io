@@ -1,7 +1,7 @@
 {
   "name": "rec-io",
   "productName": "rec.io",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "private": true,
   "description": "Offline meeting recorder: local transcription (whisper.cpp) and structured summaries (llama.cpp)",
   "author": "Felipe Silva",
