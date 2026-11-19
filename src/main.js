@@ -198,7 +198,8 @@ ipcMain.handle('summary:install', async () => {
 ipcMain.handle('summary:run', async (_event, id, language, kind) => {
   if (!summaryPack.isInstalled()) throw new Error('Summaries are not set up yet');
   if (summaryBusy) throw new Error('A summary is already running');
-  const chunks = meetings.readChunks(id);
+  // With speaker labels and names, so action items can name "Alan" or "Speaker 2".
+  const chunks = meetings.labeledChunks(id);
   const summaryKind = kind || meetings.readMeta(id).kind || 'meeting';
   summaryBusy = true;
   const progress = (label) => send('summary:progress', { id, label });
@@ -266,12 +267,19 @@ ipcMain.handle('diarize:run', async (_event, id, { offsetMs = 0, numSpeakers = '
       numSpeakers: parseSpeakerCount(numSpeakers),
       models: { segmentation: speakerPack.segmentationPath, embedding: speakerPack.embeddingPath },
     });
+    if (result.turns.length) meetings.setSpeakerTurns(id, result.turns);
     console.log(`[speakers] ${id}: ${result.speakers} speaker(s), ${result.turns.length} turns, ${Math.round(result.audioMs / 1000)} s audio in ${(result.elapsedMs / 1000).toFixed(1)} s`);
     return result;
   } finally {
     tempAudio.remove(id);
   }
 });
+
+// Manual fixes on the recording page; they work without audio. Each rewrites
+// the Markdown document; the summary picks the names up when it is re-run.
+ipcMain.handle('speakers:rename', (_event, id, speaker, name) => meetings.renameSpeaker(id, speaker, name));
+ipcMain.handle('speakers:merge', (_event, id, from, into) => meetings.mergeSpeaker(id, from, into));
+ipcMain.handle('speakers:unmerge', (_event, id, speaker) => meetings.unmergeSpeaker(id, speaker));
 
 // Developer aid for tuning (scripts/diarize-eval.mjs): with RECIO_KEEP_TEST_AUDIO
 // set to a folder, an unpackaged dev build copies the system audio there before

@@ -45,6 +45,7 @@ const ICONS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
   speaker: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>',
   download: '<path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/>',
+  pencil: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
 };
 
 // ---------- settings (remembered on this PC) ----------
@@ -87,7 +88,7 @@ const state = {
   summaryErrors: {}, // id -> message
   speakers: { installed: false, downloadMb: 36, setupProgress: null },
   diarizing: null, // { id, startedAt, estimateMs }
-  speakerResults: {}, // id -> { speakers, turns, audioMs, elapsedMs }
+  editingSpeaker: null, // { id, speaker } while a speaker name is being edited
   recording: null, // { id, startedAt, stops, store, timer, sourceStates, levels }
 };
 
@@ -158,7 +159,7 @@ async function refreshMeetings() {
 // ---------- shared pieces ----------
 function lineNode(c) {
   return h('div', { class: `line ${c.source}${c.isFinal === false ? ' partial' : ''}` },
-    h('span', { class: 'who' }, LABELS[c.source], h('span', { class: 't' }, formatTime(c.startMs))), c.text);
+    h('span', { class: 'who' }, c.speaker ?? LABELS[c.source], h('span', { class: 't' }, formatTime(c.startMs))), c.text);
 }
 const sectionLabel = (text) => h('div', { class: 'section-label' }, text);
 const badge = (iconPath, text, cls = '') => h('span', { class: `badge ${cls}` }, iconPath && icon(iconPath), text);
@@ -452,6 +453,7 @@ async function renderMeeting(id) {
       h('div', { class: 'bento' },
         diarizeStatus(id),
         summaryCards(meeting),
+        speakersCard(meeting),
         h('section', { class: 'card span-6' },
           h('details', { class: 'transcript', open: !meeting.summary || undefined },
             h('summary', {}, icon(ICONS.chevron), sectionLabel(`Transcript · ${chunks.length} ${chunks.length === 1 ? 'line' : 'lines'}`)),
@@ -615,6 +617,91 @@ async function stopRecording() {
 }
 
 // ---------- speaker separation ----------
+// The recording page's "Speakers on the other side" card: rename a speaker or
+// merge one into another. Works on the saved labels only (no audio needed);
+// a merge can be undone. The summary uses the new names when it is re-run.
+function speakersCard(meeting) {
+  const { id } = meeting.meta;
+  const all = meeting.speakers ?? [];
+  if (!all.length) return null;
+  const shown = all.filter((s) => s.mergedInto === null);
+  const row = (s) => {
+    const editing = state.editingSpeaker?.id === id && state.editingSpeaker.speaker === s.id;
+    const stats = h('span', { class: 'stats' }, `${formatTime(s.ms)} · ${s.lines} ${s.lines === 1 ? 'line' : 'lines'}`);
+    const name = editing
+      ? h('form', { class: 'rename', onsubmit: (e) => { e.preventDefault(); saveSpeakerName(id, s.id, e.currentTarget.elements.name.value); } },
+          h('input', { name: 'name', value: s.named ? s.label : '', placeholder: s.label, maxlength: '40', 'aria-label': `New name for ${s.label}`, autocomplete: 'off',
+            onkeydown: (e) => { if (e.key === 'Escape') { e.stopPropagation(); cancelSpeakerEdit(id); } } }),
+          h('button', { class: 'btn btn-outline', type: 'submit' }, 'Save'),
+          h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => cancelSpeakerEdit(id) }, 'Cancel'))
+      : h('span', { class: 'name' }, s.label);
+    const others = shown.filter((o) => o.id !== s.id);
+    const actions = !editing && h('span', { class: 'actions' },
+      iconButton(ICONS.pencil, `Rename ${s.label}`, () => editSpeaker(id, s.id)),
+      others.length > 0 && h('select', { 'aria-label': `Merge ${s.label} into another speaker`, onchange: (e) => mergeSpeakers(meeting, s.id, Number(e.currentTarget.value)) },
+        h('option', { value: '' }, 'Merge into…'),
+        others.map((o) => h('option', { value: String(o.id) }, o.label))));
+    const merged = s.merged.map((m) => h('li', { class: 'merged' }, `Includes Speaker ${m + 1}`,
+      h('button', { class: 'link', type: 'button', onclick: () => unmergeSpeaker(meeting, m) }, 'Separate again')));
+    return h('li', {}, h('div', { class: 'speaker-row' }, name, !editing && stats, actions), merged.length > 0 && h('ul', {}, merged));
+  };
+  return h('section', { class: 'card span-6 speakers-card' },
+    h('div', { class: 'card-top' }, sectionLabel(`Speakers on the other side · ${shown.length}`)),
+    h('p', { class: 'note' }, 'Wrong label? Rename a speaker, or merge two that are the same person. No audio is needed, and merges can be undone.'),
+    h('ul', { class: 'speaker-list' }, shown.map(row)));
+}
+
+function editSpeaker(id, speaker) {
+  state.editingSpeaker = { id, speaker };
+  renderContent();
+  requestAnimationFrame(() => document.querySelector('.speakers-card form.rename input')?.focus());
+}
+function cancelSpeakerEdit(id) {
+  state.editingSpeaker = null;
+  if (state.selectedId === id) renderContent();
+}
+
+// After a change: refresh the page and offer to re-run the summary with the new labels.
+async function afterSpeakerChange(id, message, extra = []) {
+  state.editingSpeaker = null;
+  await refreshMeetings();
+  if (state.selectedId === id) renderContent();
+  const hasSummary = state.meetings.find((m) => m.id === id)?.hasSummary;
+  const resummarize = hasSummary && state.summary.installed && !state.summarizing ? [['Re-summarize', () => runSummary(id)]] : [];
+  toast(hasSummary ? `${message} Re-run the summary to use it.` : message, [...extra, ...resummarize]);
+}
+
+async function saveSpeakerName(id, speaker, name) {
+  try {
+    await window.recio.renameSpeaker(id, speaker, name);
+  } catch (err) {
+    return toast(cleanError(err));
+  }
+  await afterSpeakerChange(id, name.trim() ? `Renamed to ${name.trim()}.` : 'Name reset.');
+}
+
+async function mergeSpeakers(meeting, from, into) {
+  const { id } = meeting.meta;
+  const label = (n) => meeting.speakers.find((s) => s.id === n)?.label;
+  try {
+    await window.recio.mergeSpeaker(id, from, into);
+  } catch (err) {
+    toast(cleanError(err));
+    return renderContent();
+  }
+  await afterSpeakerChange(id, `${label(from)} merged into ${label(into)}.`, [['Undo', () => unmergeSpeaker(meeting, from)]]);
+}
+
+async function unmergeSpeaker(meeting, speaker) {
+  const { id } = meeting.meta;
+  try {
+    await window.recio.unmergeSpeaker(id, speaker);
+  } catch (err) {
+    return toast(cleanError(err));
+  }
+  await afterSpeakerChange(id, `Speaker ${speaker + 1} is separate again.`);
+}
+
 // Runs in a worker in the main process; recordings stopped meanwhile wait in line.
 let speakerQueue = Promise.resolve();
 function queueSpeakerSeparation(id, offsetMs, numSpeakers) {
@@ -628,7 +715,6 @@ async function separateSpeakers(id, offsetMs, numSpeakers) {
   const ticker = setInterval(updateDiarizeProgress, 500);
   try {
     const result = await window.recio.separateSpeakers(id, { offsetMs, numSpeakers });
-    state.speakerResults[id] = result; // Phase 3 puts these onto the transcript.
     if (result.speakers) toast(`Found ${result.speakers} ${result.speakers === 1 ? 'speaker' : 'speakers'} on the other side (took ${Math.max(1, Math.round(result.elapsedMs / 1000))} s).`);
   } catch (err) {
     toast(`Speaker separation failed: ${cleanError(err)}. The transcript is kept as it was.`);

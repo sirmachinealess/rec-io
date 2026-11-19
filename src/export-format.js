@@ -42,7 +42,7 @@ function toPlainText({ meta, summary, chunks }, { includeTranscript = false } = 
   }
   if (includeTranscript) {
     section('Transcript', chunks.length
-      ? chunks.map((c) => `[${formatTime(c.startMs)}] ${LABELS[c.source] ?? c.source}: ${c.text}`)
+      ? chunks.map((c) => `[${formatTime(c.startMs)}] ${c.speaker ?? LABELS[c.source] ?? c.source}: ${c.text}`)
       : ['Nothing was transcribed.']);
   }
   out.push(`Exported from rec.io on ${new Date().toLocaleString()}`);
@@ -106,7 +106,7 @@ function lessonHtml(s) {
 function transcriptHtml(chunks) {
   if (!chunks.length) return '<section class="transcript"><div class="label">Transcript</div><p class="muted">Nothing was transcribed.</p></section>';
   return `<section class="transcript"><div class="label">Transcript</div>${chunks.map((c) =>
-    `<div class="line ${escapeHtml(c.source)}"><span class="who">${escapeHtml(LABELS[c.source] ?? c.source)} <span class="t">${formatTime(c.startMs)}</span></span><span class="text">${escapeHtml(c.text)}</span></div>`).join('')}</section>`;
+    `<div class="line ${escapeHtml(c.source)}"><span class="who">${escapeHtml(c.speaker ?? LABELS[c.source] ?? c.source)} <span class="t">${formatTime(c.startMs)}</span></span><span class="text">${escapeHtml(c.text)}</span></div>`).join('')}</section>`;
 }
 
 // fontBase: a file:// URL of the folder holding the bundled .woff2 files.

@@ -112,19 +112,22 @@ function formatTime(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// One line per speaker turn: consecutive chunks from the same source are joined.
+// One line per speaker turn: consecutive chunks with the same label are joined.
+// A chunk's own .speaker (from speaker separation) wins over labels[source], so
+// a change of speaker starts a new turn even within the system channel.
 function formatTranscript(chunks, labels) {
   const lines = [];
   let last = null;
   for (const c of [...chunks].filter((c) => c.text).sort((a, b) => a.startMs - b.startMs)) {
-    if (last && last.source === c.source) {
+    const who = c.speaker ?? labels[c.source] ?? c.source;
+    if (last && last.who === who) {
       last.text += ` ${c.text}`;
     } else {
-      last = { source: c.source, startMs: c.startMs, text: c.text };
+      last = { who, startMs: c.startMs, text: c.text };
       lines.push(last);
     }
   }
-  return lines.map((l) => `[${formatTime(l.startMs)}] ${labels[l.source] ?? l.source}: ${l.text}`).join('\n');
+  return lines.map((l) => `[${formatTime(l.startMs)}] ${l.who}: ${l.text}`).join('\n');
 }
 
 // Splits at line boundaries into parts of at most maxChars (a longer line stands alone).

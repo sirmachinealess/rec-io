@@ -34,4 +34,7 @@ contextBridge.exposeInMainWorld('recio', {
   onSpeakerSetupProgress: on('speakers:setup-progress'),
   separateSpeakers: (id, options) => ipcRenderer.invoke('diarize:run', id, options),
   onDiarizeProgress: on('diarize:progress'),
+  renameSpeaker: (id, speaker, name) => ipcRenderer.invoke('speakers:rename', id, speaker, name),
+  mergeSpeaker: (id, from, into) => ipcRenderer.invoke('speakers:merge', id, from, into),
+  unmergeSpeaker: (id, speaker) => ipcRenderer.invoke('speakers:unmerge', id, speaker),
 });
