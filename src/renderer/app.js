@@ -1,5 +1,6 @@
 import { getMicrophone, getSystemAudio, startPcmCapture } from './capture.js';
 import { LocalAsrStream } from './local-asr.js';
+import { AudioBatcher } from './audio-batcher.js';
 import { TranscriptStore, formatTime } from './transcript.js';
 
 const $ = (id) => document.getElementById(id);
@@ -48,7 +49,7 @@ const ICONS = {
 
 // ---------- settings (remembered on this PC) ----------
 const SETTINGS_KEY = 'recio.settings';
-const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language' };
+const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language', separateSpeakers: 'separate-speakers' };
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -500,9 +501,10 @@ function updateDock() {
 // ---------- recording ----------
 async function startSource(rec, source, getStream) {
   const stream = await getStream();
+  const offsetMs = Date.now() - new Date(rec.startedAt).getTime();
   const asr = new LocalAsrStream({
     source,
-    offsetMs: Date.now() - new Date(rec.startedAt).getTime(),
+    offsetMs,
     getOptions: () => ({ language: $('language').value, prompt: $('vocabulary').value.trim() }),
     onStatus: (text) => setSourceState(source, text),
     onChunk: (chunk) => {
@@ -511,14 +513,35 @@ async function startSource(rec, source, getStream) {
       if (chunk.isFinal && chunk.text) window.recio.appendChunk(rec.id, chunk).catch((e) => console.error(e.message));
     },
   });
+  const batcher = source === 'system' && rec.keepSystemAudio ? keepSystemAudio(rec, offsetMs) : null;
   const stopCapture = await startPcmCapture(stream, (frame) => {
     showLevel(source, frameLevel(frame));
+    batcher?.push(frame);
     asr.push(frame);
   });
   return async () => {
     await stopCapture();
-    await asr.stop();
+    batcher?.flush();
+    await Promise.all([asr.stop(), rec.systemAudio?.writes]);
   };
+}
+
+// Speaker separation: the system channel is written to a temporary file in ~1 s
+// batches, in order. Sample 0 of the file is offsetMs after the recording start,
+// the same timeline the transcript chunks use. If a write fails, the file has a
+// gap and timestamps would drift, so the recording is marked and not separated.
+function keepSystemAudio(rec, offsetMs) {
+  const audio = { offsetMs, writes: Promise.resolve(), failed: false };
+  rec.systemAudio = audio;
+  return new AudioBatcher((pcm) => {
+    audio.writes = audio.writes.then(() => {
+      if (audio.failed) return;
+      return window.recio.appendAudio(rec.id, pcm).catch((err) => {
+        audio.failed = true;
+        console.error(`[speakers] could not keep system audio: ${err.message}`);
+      });
+    });
+  });
 }
 
 async function startRecording() {
@@ -528,7 +551,8 @@ async function startRecording() {
   const id = startedAt.replace(/[:.]/g, '-');
   const kind = $('recording-kind').value;
   await window.recio.createMeeting(id, startedAt, kind);
-  const rec = { id, startedAt, kind, stops: [], store: new TranscriptStore(), sourceStates: {}, levels: {} };
+  const keepAudio = $('use-system').checked && $('separate-speakers').checked;
+  const rec = { id, startedAt, kind, keepSystemAudio: keepAudio, stops: [], store: new TranscriptStore(), sourceStates: {}, levels: {} };
   state.recording = rec;
   state.selectedId = id;
   $('rec-timer').textContent = '0:00';
@@ -562,6 +586,8 @@ async function stopRecording() {
   waveHistory = [...IDLE_WAVE];
   drawWave();
   await window.recio.finishMeeting(rec.id);
+  // Phase 2 runs speaker separation here; until then the audio is not kept.
+  if (rec.systemAudio) await window.recio.discardAudio(rec.id).catch((e) => console.error(e.message));
   state.recording = null;
   updateDock();
   await refreshMeetings();

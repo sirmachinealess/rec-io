@@ -9,6 +9,7 @@ const { LlamaServer } = require('./llama-server');
 const { SummaryPack } = require('./summary-pack');
 const { summarizeTranscript } = require('./summarize');
 const { MeetingStore, LABELS } = require('./meetings');
+const { TempAudio } = require('./temp-audio');
 
 // Installed: the engine ships in <install dir>/resources/local. Dev: ./local.
 const LOCAL_DIR = app.isPackaged ? path.join(process.resourcesPath, 'local') : path.join(__dirname, '..', 'local');
@@ -19,6 +20,8 @@ app.setPath('userData', path.join(app.getPath('appData'), 'rec.io'));
 const meetingsDir = path.join(app.getPath('userData'), 'meetings');
 const meetings = new MeetingStore(meetingsDir);
 const summaryPack = new SummaryPack(path.join(app.getPath('userData'), 'llm'));
+// System audio kept only until speaker separation has run (see temp-audio.js).
+const tempAudio = new TempAudio(path.join(app.getPath('userData'), 'tmp'));
 
 // Moves recordings saved as flat <id>.jsonl files by early versions into the
 // per-meeting layout. Logged to %APPDATA%\rec.io\migration-log.txt.
@@ -115,6 +118,10 @@ ipcMain.handle('asr:transcribe', async (_event, pcmBuffer, options) => {
 ipcMain.handle('meetings:create', (_event, id, startedAt, kind) => meetings.create(id, startedAt, kind === 'lesson' ? 'lesson' : 'meeting'));
 ipcMain.handle('meetings:append-chunk', (_event, id, chunk) => meetings.appendChunk(id, chunk));
 ipcMain.handle('meetings:finish', (_event, id) => meetings.finish(id));
+// Raw system-channel PCM for speaker separation; the renderer sends it only when
+// "Separate speakers" is on. The microphone is never written to disk.
+ipcMain.handle('meetings:append-audio', (_event, id, pcm) => tempAudio.append(id, pcm));
+ipcMain.handle('meetings:discard-audio', (_event, id) => tempAudio.remove(id));
 ipcMain.handle('meetings:list', () => meetings.list());
 ipcMain.handle('meetings:get', (_event, id) => meetings.get(id));
 ipcMain.handle('meetings:reveal', (_event, id) => {
@@ -210,7 +217,18 @@ ipcMain.handle('summary:run', async (_event, id, language, kind) => {
   }
 });
 
+// Removes system audio left behind by a crash or by closing the app mid-way.
+function cleanupTempAudio() {
+  try {
+    const removed = tempAudio.cleanup();
+    if (removed) console.log(`[temp-audio] removed ${removed} leftover file(s)`);
+  } catch (err) {
+    console.warn(`[temp-audio] cleanup failed: ${err.message}`);
+  }
+}
+
 app.whenReady().then(() => {
+  cleanupTempAudio();
   migrateOldMeetings();
   lockNetwork();
   createWindow();
@@ -221,4 +239,7 @@ app.whenReady().then(() => {
   });
 });
 app.on('window-all-closed', () => app.quit());
-app.on('will-quit', () => whisper.stop());
+app.on('will-quit', () => {
+  whisper.stop();
+  cleanupTempAudio();
+});

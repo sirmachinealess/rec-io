@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('recio', {
   createMeeting: (id, startedAt, kind) => ipcRenderer.invoke('meetings:create', id, startedAt, kind),
   appendChunk: (id, chunk) => ipcRenderer.invoke('meetings:append-chunk', id, chunk),
   finishMeeting: (id) => ipcRenderer.invoke('meetings:finish', id),
+  appendAudio: (id, pcm) => ipcRenderer.invoke('meetings:append-audio', id, pcm),
+  discardAudio: (id) => ipcRenderer.invoke('meetings:discard-audio', id),
   listMeetings: () => ipcRenderer.invoke('meetings:list'),
   getMeeting: (id) => ipcRenderer.invoke('meetings:get', id),
   revealMeeting: (id) => ipcRenderer.invoke('meetings:reveal', id),
