@@ -184,7 +184,7 @@ function keepSaidExamples(notes, chunks) {
 
 async function summarizeTranscript(options) {
   let summary = await draftSummary(options);
-  if (summary.kind !== 'lesson') return summary;
+  if (summary.kind !== 'lesson') return fmt.tidyMeetingSummary(summary);
   summary = keepSaidExamples(summary, options.chunks);
   if (!fmt.LANGUAGES[options.language]) return summary;
   options.onProgress?.('Translating the notes…');
@@ -195,9 +195,15 @@ async function draftSummary({ chunks, labels, language, kind = 'meeting', llm, o
   if (!fmt.KINDS.includes(kind)) throw new Error(`unknown summary type: ${kind}`);
   const transcript = fmt.formatTranscript(chunks, labels);
   if (!transcript.trim()) throw new Error('Nothing was transcribed, so there is nothing to summarize.');
-  const system = { role: 'system', content: fmt.promptFor(kind, language) };
-  const schema = fmt.schemaFor(kind);
   const parts = fmt.splitTranscript(transcript, partChars(kind));
+  // Speaker labels for owners, and the length for the number of topics (per part
+  // while reading parts, for the whole recording when merging).
+  const speakers = fmt.speakerContext(chunks);
+  const minutes = fmt.minutesOf(chunks);
+  const prompt = (m) => ({ role: 'system', content: fmt.promptFor(kind, language, { ...speakers, minutes: m }) });
+  const partMinutes = parts.length > 1 ? minutes / parts.length : minutes;
+  const system = prompt(partMinutes);
+  const schema = fmt.schemaFor(kind, partMinutes);
 
   const partSummaries = [];
   for (const [i, part] of parts.entries()) {
@@ -207,7 +213,7 @@ async function draftSummary({ chunks, labels, language, kind = 'meeting', llm, o
   if (partSummaries.length === 1) return { ...partSummaries[0], kind };
 
   onProgress('Merging parts…');
-  const merged = await llm.chatJson([system, { role: 'user', content: fmt.mergePrompt(partSummaries, kind) }], schema, { maxTokens: MERGE_TOKENS[kind] });
+  const merged = await llm.chatJson([prompt(minutes), { role: 'user', content: fmt.mergePrompt(partSummaries, kind, minutes) }], fmt.schemaFor(kind, minutes), { maxTokens: MERGE_TOKENS[kind] });
   return { ...merged, kind };
 }
 

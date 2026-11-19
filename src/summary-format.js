@@ -146,19 +146,73 @@ function splitTranscript(text, maxChars) {
   return parts;
 }
 
-function systemPrompt(language) {
-  const lang = LANGUAGES[language] ?? 'the language that was mostly spoken in the meeting';
+// How many topics fit a recording of this length: a 5-minute call does not
+// have 12 subjects. Short recordings get 3 to 5, long ones a few more.
+function topicRange(minutes) {
+  if (!(minutes > 0) || minutes < 15) return [3, 5];
+  if (minutes < 45) return [4, 7];
+  return [5, 9];
+}
+
+// Speaker labels of the transcript, from labelled chunks: { others: ["Gary", "Speaker 2"], them: bool }.
+function speakerContext(chunks) {
+  const system = chunks.filter((c) => c.source === 'system' && c.text);
+  return {
+    others: [...new Set(system.filter((c) => c.speaker).map((c) => c.speaker))],
+    them: system.some((c) => !c.speaker),
+  };
+}
+
+function minutesOf(chunks) {
+  if (!chunks.length) return 0;
+  const start = Math.min(...chunks.map((c) => c.startMs));
+  const end = Math.max(...chunks.map((c) => c.endMs ?? c.startMs));
+  return Math.max(0, (end - start) / 60000);
+}
+
+function speakerRules({ others = [], them = true } = {}) {
+  const quote = (s) => `"${s}"`;
+  if (!others.length) {
+    return ['Each line starts with who spoke. "Me" is the person who recorded it;',
+      '"Them" is everyone heard through the computer audio (one or more people).'];
+  }
   return [
-    'You write accurate, structured summaries of meetings from transcripts.',
-    'The transcript comes from automatic speech recognition. "Me" is the person who recorded it;',
-    '"Them" is everyone heard through the computer audio (one or more people).',
+    'Each line starts with who spoke. "Me" is the person who recorded it.',
+    `The other people, heard through the computer audio, are ${others.map(quote).join(', ')}${them ? '; "Them" is someone on the computer audio who could not be told apart.' : '.'}`,
+    'A label like "Speaker 2" means that person\'s name is not known.',
+    'When you say who said, decided or will do something, use these labels exactly as written.',
+  ];
+}
+
+// context: { others, them } from speakerContext() and minutes (length of what is summarized).
+function systemPrompt(language, { others = [], them = true, minutes = 0 } = {}) {
+  const lang = LANGUAGES[language] ?? 'the language that was mostly spoken in the meeting';
+  const [min, max] = topicRange(minutes);
+  return [
+    'You write accurate, concise summaries of meetings and calls from transcripts.',
+    'The transcript comes from automatic speech recognition.',
+    ...speakerRules({ others, them }),
     'It may contain recognition errors: read past obvious mistakes, but never invent facts.',
-    'title: the main topic of the whole meeting in 3 to 8 words, specific enough to recognize it later',
+    'title: the main topic of the whole recording in 3 to 8 words, specific enough to recognize it later',
     '(for example "Release delay and launch pricing"); no words like "meeting", "summary" or a date.',
-    'Cover everything substantive that was said, grouped into topics in the order discussed.',
+    'overview: 2 to 4 sentences on what was discussed and concluded.',
+    `topics: ${min} to ${max} topics${minutes > 0 ? ` for this ${Math.max(1, Math.round(minutes))}-minute recording` : ''}, in the order discussed.`,
+    'A topic is a subject that was actually talked about (a project, a problem, a plan, a match, a question),',
+    'with 2 to 5 points that are specific facts, numbers, names, arguments or outcomes.',
+    'Never make a topic about the conversation itself: not about its tone, style or mood, how funny or friendly',
+    'it was, greetings or small talk, or the participants thanking or appreciating each other; and no topic',
+    'listing open questions. Such things as the subject of the discussion are fine (for example humour in an ad campaign).',
+    'Each fact appears in only one topic; do not repeat a point under another topic or restate the overview.',
     'Keep names, numbers, dates, amounts and commitments exactly.',
-    'decisions: only things actually agreed. action_items: concrete tasks; owner is "Me", "Them"',
-    'or a person named in the transcript, and owner/due are "" when not stated.',
+    'decisions: only things the speakers explicitly agreed on; [] if none.',
+    'action_items: only when a speaker explicitly committed to doing something ("I will send the slides by Friday")',
+    'or explicitly accepted a request. Opinions, wishes, jokes, suggestions, predictions, a host asking a guest',
+    'to tell a story now, and remarks made to an audience (podcast, interview, broadcast) are not action items.',
+    'If nobody committed to anything, action_items is []; an empty list is normal and expected.',
+    'owner: the label of the person who committed, exactly as written at the start of their lines, or a person',
+    'named in the transcript; "" if unclear. due: "" when not stated.',
+    'open_questions: questions raised in the conversation and left unanswered; [] if none.',
+    'Never add questions of your own.',
     'Use empty arrays when a section does not apply.',
     `Write every field in ${lang}.`,
   ].join(' ');
@@ -211,12 +265,59 @@ function lessonSystemPrompt(language) {
   ].join('\n');
 }
 
-function promptFor(kind, language) {
-  return kind === 'lesson' ? lessonSystemPrompt(language) : systemPrompt(language);
+// context (meetings only): { others, them, minutes }; see systemPrompt.
+function promptFor(kind, language, context) {
+  return kind === 'lesson' ? lessonSystemPrompt(language) : systemPrompt(language, context);
 }
 
-function schemaFor(kind) {
-  return kind === 'lesson' ? LESSON_SCHEMA : SUMMARY_SCHEMA;
+// minutes (meetings): caps the number of topics while the model writes, since a
+// small model ignores a count given only in the prompt (12 topics for 5 minutes).
+function schemaFor(kind, minutes = 0) {
+  if (kind === 'lesson') return LESSON_SCHEMA;
+  const schema = structuredClone(SUMMARY_SCHEMA);
+  schema.properties.topics.minItems = 1;
+  schema.properties.topics.maxItems = topicRange(minutes)[1];
+  schema.properties.topics.items.properties.points.maxItems = 5;
+  return schema;
+}
+
+// Safety net only (the prompt does the real work): topic titles that can only be
+// about the conversation itself, matched as the WHOLE title, so a real subject
+// such as "Humour in the spring campaign" is never dropped (en, de, pt).
+const META_TITLES = new Set([
+  'tone', 'tone and style', 'tone and mood', 'style and tone', 'mood', 'atmosphere', 'overall tone',
+  'group appreciation', 'group appreciation and gratitude', 'appreciation and gratitude', 'gratitude and appreciation',
+  'thanks', 'closing thanks', 'greetings', 'small talk', 'open questions', 'unresolved questions',
+  'unresolved or open-ended questions',
+  'ton und stil', 'stimmung', 'dank', 'danksagung', 'begrüßung', 'offene fragen',
+  'tom e estilo', 'clima', 'agradecimentos', 'saudações', 'perguntas em aberto',
+]);
+const isMetaTopic = (title) => META_TITLES.has(String(title).toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/\s+/g, ' ').trim());
+
+const wordSet = (text) => new Set(String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+function similarWords(a, b) {
+  let shared = 0;
+  for (const w of a) if (b.has(w)) shared++;
+  return shared / Math.max(1, a.size + b.size - shared) >= 0.7;
+}
+
+// Safety net after the model: drops meta topics (keeping at least one topic),
+// points that repeat an earlier point, and topics left without points.
+function tidyMeetingSummary(summary) {
+  const real = summary.topics.filter((t) => !isMetaTopic(t.topic));
+  const seen = [];
+  const topics = (real.length ? real : summary.topics)
+    .map((t) => ({
+      ...t,
+      points: t.points.filter((p) => {
+        const w = wordSet(p);
+        if (w.size === 0 || seen.some((s) => similarWords(s, w))) return false;
+        seen.push(w);
+        return true;
+      }),
+    }))
+    .filter((t) => t.points.length > 0);
+  return { ...summary, topics };
 }
 
 function partPrompt(transcript, index, total, kind = 'meeting') {
@@ -225,15 +326,19 @@ function partPrompt(transcript, index, total, kind = 'meeting') {
   return `${scope}Transcript:\n${transcript}`;
 }
 
-function mergePrompt(partSummaries, kind = 'meeting') {
+// minutes: length of the whole recording (meetings), for the number of topics.
+function mergePrompt(partSummaries, kind = 'meeting', minutes = 0) {
+  const [min, max] = topicRange(minutes);
   const how = kind === 'lesson'
     ? ['These JSON objects are study notes for consecutive parts of one language lesson.',
       'Merge them into one set of notes for the whole lesson: one title and overview; grammar,',
       'vocabulary, phrases and corrections merged without duplicates (keep every distinct item);',
       'every exercise, homework task and review point kept.']
     : ['These JSON objects summarize consecutive parts of one meeting.',
-      'Merge them into a single summary of the whole meeting: one title and overview,',
-      'topics merged and deduplicated in order, and every decision, action item and open question kept.'];
+      'Merge them into a single summary of the whole meeting: one title and overview;',
+      `${min} to ${max} topics in total, in order: combine topics about the same subject into one, keep each fact once,`,
+      'and drop any topic about the conversation itself (its tone or mood, the participants thanking or appreciating each other, open questions).',
+      'Keep every decision, action item and open question, without duplicates.'];
   return [...how, '', JSON.stringify(partSummaries)].join('\n');
 }
 
@@ -285,5 +390,5 @@ function toMarkdown(summary, { date } = {}) {
 
 module.exports = {
   SUMMARY_SCHEMA, LESSON_SCHEMA, KINDS, LANGUAGES, formatTranscript, splitTranscript, systemPrompt, lessonSystemPrompt,
-  promptFor, schemaFor, partPrompt, mergePrompt, toMarkdown,
+  promptFor, schemaFor, partPrompt, mergePrompt, toMarkdown, topicRange, speakerContext, minutesOf, tidyMeetingSummary,
 };

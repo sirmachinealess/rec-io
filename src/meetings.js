@@ -135,8 +135,21 @@ class MeetingStore {
     return this.writeSpeakers(id, change(data));
   }
 
+  // Also puts the new name into an existing summary right away (and into the
+  // title, which names the document), so no re-run of the model is needed.
   renameSpeaker(id, speaker, name) {
-    return this.updateSpeakers(id, (d) => speakers.renameSpeaker(d, speaker, name));
+    const before = this.readSpeakers(id);
+    if (!before) throw new Error('This recording has no separated speakers');
+    const after = speakers.renameSpeaker(before, speaker, name);
+    const from = speakers.speakerLabel(before, speaker);
+    const to = speakers.speakerLabel(after, speaker);
+    const summary = this.readSummary(id);
+    if (summary && from !== to) {
+      fs.writeFileSync(path.join(this.dir(id), 'summary.json'), JSON.stringify(speakers.replaceLabel(summary, from, to), null, 2));
+      const meta = this.readMeta(id);
+      if (meta.title) this.writeMeta({ ...meta, title: cleanTitle(speakers.replaceLabel(meta.title, from, to)) });
+    }
+    return this.writeSpeakers(id, after);
   }
 
   mergeSpeaker(id, from, into) {

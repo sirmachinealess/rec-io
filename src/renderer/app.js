@@ -661,14 +661,17 @@ function cancelSpeakerEdit(id) {
   if (state.selectedId === id) renderContent();
 }
 
-// After a change: refresh the page and offer to re-run the summary with the new labels.
-async function afterSpeakerChange(id, message, extra = []) {
+// After a change: refresh the page. A rename is already in the summary (swapped
+// in place); after a merge, offer to re-run the summary with the new labels.
+async function afterSpeakerChange(id, message, { extra = [], resummarize = true } = {}) {
   state.editingSpeaker = null;
   await refreshMeetings();
   if (state.selectedId === id) renderContent();
   const hasSummary = state.meetings.find((m) => m.id === id)?.hasSummary;
-  const resummarize = hasSummary && state.summary.installed && !state.summarizing ? [['Re-summarize', () => runSummary(id)]] : [];
-  toast(hasSummary ? `${message} Re-run the summary to use it.` : message, [...extra, ...resummarize]);
+  if (!hasSummary) return toast(message, extra);
+  if (!resummarize) return toast(`${message.replace(/.$/, '')} in the transcript and summary.`, extra);
+  const action = state.summary.installed && !state.summarizing ? [['Re-summarize', () => runSummary(id)]] : [];
+  toast(`${message} Re-run the summary to use it.`, [...extra, ...action]);
 }
 
 async function saveSpeakerName(id, speaker, name) {
@@ -677,7 +680,7 @@ async function saveSpeakerName(id, speaker, name) {
   } catch (err) {
     return toast(cleanError(err));
   }
-  await afterSpeakerChange(id, name.trim() ? `Renamed to ${name.trim()}.` : 'Name reset.');
+  await afterSpeakerChange(id, name.trim() ? `Renamed to ${name.trim()}.` : 'Name reset.', { resummarize: false });
 }
 
 async function mergeSpeakers(meeting, from, into) {
@@ -689,7 +692,7 @@ async function mergeSpeakers(meeting, from, into) {
     toast(cleanError(err));
     return renderContent();
   }
-  await afterSpeakerChange(id, `${label(from)} merged into ${label(into)}.`, [['Undo', () => unmergeSpeaker(meeting, from)]]);
+  await afterSpeakerChange(id, `${label(from)} merged into ${label(into)}.`, { extra: [['Undo', () => unmergeSpeaker(meeting, from)]] });
 }
 
 async function unmergeSpeaker(meeting, speaker) {

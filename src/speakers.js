@@ -137,7 +137,24 @@ function unmergeSpeaker(data, n) {
   return { ...data, mergedInto };
 }
 
+// After a rename: swaps the old label for the new one in every text of an
+// existing summary (owners, topics, overview, …) without re-running the model.
+// Whole labels only: "Speaker 1" does not touch "Speaker 10".
+function replaceLabel(value, from, to) {
+  if (!from || from === to) return value;
+  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'gu');
+  const walk = (v) => {
+    if (typeof v === 'string') return v.replace(pattern, () => to);
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value);
+}
+
 module.exports = {
+  replaceLabel,
   VERSION,
   MAX_NAME,
   chunkKey,

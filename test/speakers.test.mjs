@@ -150,3 +150,29 @@ test('the store keeps labels in speakers.json, updates the document and leaves t
   assert.equal(fs.existsSync(path.join(root, '.data', id, 'speakers.json.tmp')), false);
   assert.throws(() => store.renameSpeaker('2026-11-19T10-00-00-000Z', 0, 'x'));
 });
+
+test('renaming in the store updates an existing summary and its title at once; merges do not', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'recio-spk-'));
+  const store = new MeetingStore(root);
+  const id = '2026-11-19T11-33-32-611Z';
+  store.create(id, '2026-11-19T11:33:32.611Z');
+  const { chunks } = threeSpeakers();
+  for (const c of chunks) store.appendChunk(id, c);
+  store.finish(id, '2026-11-19T11:40:00.000Z');
+  store.setSpeakerTurns(id, [turn(0, 5, 0), turn(5, 10, 1), turn(10, 15, 2)]);
+  store.setSummary(id, {
+    title: 'Speaker 1 on the derby', overview: 'Speaker 1 disagreed with Speaker 2.', topics: [], decisions: [],
+    action_items: [{ task: 'Check footage', owner: 'Speaker 2', due: '' }], open_questions: [], kind: 'meeting',
+  });
+  store.renameSpeaker(id, 0, 'Gary');
+  store.renameSpeaker(id, 1, 'Micah');
+  const s = store.readSummary(id);
+  assert.equal(s.overview, 'Gary disagreed with Micah.');
+  assert.equal(s.action_items[0].owner, 'Micah');
+  assert.equal(store.readMeta(id).title, 'Gary on the derby');
+  assert.match(store.readMeta(id).file, /Gary on the derby\.md$/);
+  store.mergeSpeaker(id, 2, 0);
+  assert.equal(store.readSummary(id).overview, 'Gary disagreed with Micah.', 'merge leaves the summary for Re-summarize');
+  store.renameSpeaker(id, 0, '');
+  assert.equal(store.readSummary(id).overview, 'Speaker 1 disagreed with Micah.', 'a reset puts the default label back');
+});
