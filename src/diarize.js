@@ -10,8 +10,13 @@ const SAMPLE_RATE = 16000;
 const MAX_SPEAKERS = 10;
 // Below this there is nothing useful to separate.
 const MIN_AUDIO_MS = 2000;
-// Clustering threshold: higher = fewer speakers. Tuned on test calls (see README).
+// Clustering threshold: higher = fewer speakers. 0.9 keeps two similar voices
+// apart; the over-splitting it causes in noisy calls is undone by the merge pass.
 const DEFAULT_THRESHOLD = 0.9;
+// Second pass (speaker-merge.js), tuned on English and German 3-voice test calls:
+// speakers under 3 s or 4% of all speech go to the nearest one first, then
+// speakers at least 0.5 alike are joined; a known count joins down to that number.
+const MERGE = { minMs: 3000, minShare: 0.04, similarity: 0.5 };
 // Measured on an i7-10700K (8 cores): see README for the timings.
 const DEFAULT_THREADS = Math.max(1, Math.min(8, (os.availableParallelism?.() ?? os.cpus().length) - 1));
 // Seconds of processing per second of audio, used only for the progress estimate.
@@ -71,6 +76,11 @@ function toTurns(segments, offsetMs = 0) {
     });
 }
 
+// File-relative turns -> recording timeline.
+function shiftTurns(turns, offsetMs) {
+  return turns.map((t) => ({ startMs: t.startMs + offsetMs, endMs: t.endMs + offsetMs, speaker: t.speaker }));
+}
+
 function estimateMs(audioMs) {
   return Math.max(1000, audioMs * ESTIMATED_RTF);
 }
@@ -94,12 +104,15 @@ class Diarizer {
     const config = {
       segmentation: { pyannote: { model: models.segmentation }, numThreads: threads },
       embedding: { model: models.embedding, numThreads: threads },
-      clustering: { numClusters: numSpeakers, threshold },
+      // Clustering stays automatic even with a known count: the merge pass,
+      // which compares whole speakers, reaches it more reliably.
+      clustering: { numClusters: 0, threshold },
       minDurationOn: 0.2,
       minDurationOff: 0.5,
     };
-    const segments = await new Promise((resolve, reject) => {
-      const worker = new Worker(path.join(__dirname, 'diarize-worker.js'), { workerData: { pcmFile, config } });
+    const merge = { ...MERGE, count: numSpeakers };
+    const fileTurns = await new Promise((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, 'diarize-worker.js'), { workerData: { pcmFile, config, merge } });
       this.worker = worker;
       let settled = false;
       const done = (fn, value) => {
@@ -108,11 +121,11 @@ class Diarizer {
         this.worker = null;
         fn(value);
       };
-      worker.on('message', (msg) => (msg.error ? done(reject, new Error(msg.error)) : done(resolve, msg.segments)));
+      worker.on('message', (msg) => (msg.error ? done(reject, new Error(msg.error)) : done(resolve, msg.turns)));
       worker.on('error', (err) => done(reject, err));
       worker.on('exit', (code) => done(reject, new Error(code === 1 ? 'Speaker separation was cancelled' : `Speaker separation stopped (exit ${code})`)));
     });
-    const turns = toTurns(segments, offsetMs);
+    const turns = shiftTurns(fileTurns, offsetMs);
     return { turns, speakers: new Set(turns.map((t) => t.speaker)).size, audioMs, elapsedMs: Date.now() - started };
   }
 
@@ -128,7 +141,9 @@ module.exports = {
   int16ToFloat32,
   readPcmFloat32,
   toTurns,
+  shiftTurns,
   estimateMs,
+  MERGE,
   DEFAULT_THRESHOLD,
   DEFAULT_THREADS,
   MAX_SPEAKERS,

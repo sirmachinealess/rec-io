@@ -99,3 +99,12 @@ test('the speaker pack installs only after every file is verified', async () => 
   assert.equal(pack.isInstalled(), false);
   assert.equal(fs.existsSync(pack.embeddingPath), false);
 });
+
+test('worker turns move onto the recording timeline', () => {
+  assert.deepEqual(diarize.shiftTurns([{ startMs: 0, endMs: 500, speaker: 1 }], 2000), [{ startMs: 2000, endMs: 2500, speaker: 1 }]);
+});
+
+test('the merge pass uses the tuned defaults', () => {
+  assert.deepEqual(diarize.MERGE, { minMs: 3000, minShare: 0.04, similarity: 0.5 });
+  assert.equal(diarize.DEFAULT_THRESHOLD, 0.9);
+});

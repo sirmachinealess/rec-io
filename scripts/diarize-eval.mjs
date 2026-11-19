@@ -2,7 +2,13 @@
 // runs fully offline once the models are on disk).
 //
 //   node scripts/diarize-eval.mjs --models <dir> [--threads 4,8] [--thresholds 0.7,0.8,0.9]
-//        [--speakers N] call-en.wav[:call-en.rttm] call-de.wav[:call-de.rttm] ...
+//        [--speakers N] [--min-on 0.2] [--min-off 0.5] [--merge-similar 0.6] [--merge-below 10]
+//        call-en.wav[:call-en.rttm] call-de.wav[:call-de.rttm] ...
+//
+// --min-on / --min-off: segmentation, in seconds (shortest speech piece kept /
+// shortest pause that splits a piece). --merge-similar (cosine 0–1) and
+// --merge-below (seconds of speech) turn on the second pass in
+// src/speaker-merge.js; give several comma-separated values to compare them.
 //
 // <dir> holds segmentation.onnx plus one or more embedding *.onnx files; every
 // embedding is tried. Audio: 16 kHz mono 16-bit WAV, or rec.io's raw .pcm.
@@ -16,6 +22,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const sherpa = require('sherpa-onnx-node');
 const { toTurns, int16ToFloat32 } = require('../src/diarize.js');
+const { mergeSpeakers, speakerDurations } = require('../src/speaker-merge.js');
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -28,6 +35,15 @@ const modelsDir = opt('models');
 const threadsList = opt('threads', '4,8').split(',').map(Number);
 const thresholds = opt('thresholds', '0.6,0.7,0.8,0.9,1.0').split(',').map(Number);
 const numSpeakers = Number(opt('speakers', '0'));
+const minOn = Number(opt('min-on', '0.2'));
+const minOff = Number(opt('min-off', '0.5'));
+const list = (v) => v.split(',').map(Number);
+const mergeSimilar = list(opt('merge-similar', '0'));
+const mergeBelow = list(opt('merge-below', '0'));
+// --merge-to N: tell the second pass the number of speakers (clustering stays automatic).
+const mergeTo = Number(opt('merge-to', '0'));
+// --merge-share 0.04: speakers with under 4% of all speech also count as tiny.
+const mergeShare = Number(opt('merge-share', '0'));
 if (!modelsDir || args.length === 0) {
   console.error('usage: node scripts/diarize-eval.mjs --models <dir> [--threads 4,8] [--thresholds ...] [--speakers N] file.wav[:ref.rttm] ...');
   process.exit(1);
@@ -108,25 +124,42 @@ for (const spec of args) {
         segmentation: { pyannote: { model: path.join(modelsDir, 'segmentation.onnx') }, numThreads: threads },
         embedding: { model: path.join(modelsDir, embedding), numThreads: threads },
         clustering: { numClusters: numSpeakers, threshold: thresholds[0] },
-        minDurationOn: 0.2,
-        minDurationOff: 0.5,
+        minDurationOn: minOn,
+        minDurationOff: minOff,
       });
+      const extractor = new sherpa.SpeakerEmbeddingExtractor({ model: path.join(modelsDir, embedding), numThreads: threads });
+      const embed = (audio) => {
+        const stream = extractor.createStream();
+        stream.acceptWaveform({ sampleRate: 16000, samples: audio });
+        stream.inputFinished();
+        return extractor.compute(stream, false);
+      };
       // Only the first run per model and thread count is timed for speed.
       for (const [i, threshold] of thresholds.entries()) {
         sd.setConfig({ clustering: { numClusters: numSpeakers, threshold } });
         const t0 = performance.now();
-        const turns = toTurns(sd.process(samples));
+        const raw = toTurns(sd.process(samples));
         const ms = performance.now() - t0;
+        for (const similarity of mergeSimilar) for (const below of mergeBelow) {
+        const m0 = performance.now();
+        const turns = mergeSpeakers(raw, samples, embed, { similarity, minMs: below * 1000, minShare: mergeShare, count: mergeTo });
+        const mergeMs = performance.now() - m0;
         const found = new Set(turns.map((t) => t.speaker)).size;
         rows.push({
           file: path.basename(audioFile),
           embedding: embedding.replace(/^3dspeaker_speech_|_16k\.onnx$/g, ''),
           threads,
           threshold,
+          ...(mergeTo ? { 'merge to': mergeTo } : {}),
+          ...(mergeShare ? { 'merge share': mergeShare } : {}),
+          ...(similarity || below ? { 'merge sim': similarity || '-', 'merge <s': below || '-', 'merge s': (mergeMs / 1000).toFixed(1) } : {}),
           speakers: `${found}/${expected}`,
+          // Seconds of speech per found speaker, largest first: shows tiny clusters.
+          'speech s per speaker': [...speakerDurations(turns).values()].sort((a, b) => b - a).map((v) => Math.round(v / 1000)).join(' '),
           ...(ref ? score(ref, turns, audioMs) : {}),
           ...(i === 0 ? { seconds: (ms / 1000).toFixed(1), 'per hour of audio': `${((ms / audioMs) * 60).toFixed(1)} min` } : {}),
         });
+        }
       }
     }
   }

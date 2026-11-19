@@ -41,6 +41,16 @@
   <div id="dock" class="dock" role="toolbar" aria-label="Recorder">
     <div id="dock-wave" class="wave" aria-hidden="true"></div>
     <span id="dock-hint" class="hint">Ready</span>
+    <!-- Asked per recording: the call audio is deleted after separation, so it cannot be redone later. -->
+    <label id="people-field" class="people" hidden title="Optional. Enter it if you know it: automatic detection can find too many speakers in noisy calls.">
+      <span>People on the other side</span>
+      <select id="people-count" aria-describedby="people-hint">
+        <option value="">Auto</option>
+        <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+        <option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
+      </select>
+      <span id="people-hint" class="sr-only">Optional. Enter it if you know it: automatic detection can find too many speakers in noisy calls.</span>
+    </label>
     <span id="rec-live" class="rec-live" hidden><i class="rec-dot"></i><span id="rec-timer">0:00</span></span>
     <button id="record" class="btn btn-primary" disabled><span class="dot" aria-hidden="true"></span><span>Start recording</span></button>
   </div>
@@ -77,10 +87,6 @@
           <label class="sw"><input type="checkbox" id="separate-speakers" disabled aria-describedby="speakers-note"><span class="track"></span><span>Separate speakers<small>After Stop, label the other side as Speaker 1, 2, … The call audio is kept only until then.</small></span></label>
           <p id="speakers-note" class="note"></p>
           <div id="speakers-setup"></div>
-          <label class="field">Number of speakers on the other side
-            <input id="speaker-count" type="number" min="1" max="10" step="1" inputmode="numeric" placeholder="Automatic" aria-describedby="speaker-count-hint">
-            <span id="speaker-count-hint" class="hint">Leave blank to detect it. Set it if you know it, for more reliable labels.</span>
-          </label>
           <div class="field-row">
             <label class="field">Spoken language
               <select id="language">

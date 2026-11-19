@@ -49,7 +49,7 @@ const ICONS = {
 
 // ---------- settings (remembered on this PC) ----------
 const SETTINGS_KEY = 'recio.settings';
-const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language', separateSpeakers: 'separate-speakers', speakerCount: 'speaker-count' };
+const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language', separateSpeakers: 'separate-speakers' };
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -500,6 +500,7 @@ function updateDock() {
   $('dock-hint').textContent = state.engineReady ? 'Ready' : 'Loading…';
   $('rec-live').hidden = !rec;
   $('new-recording').disabled = Boolean(rec) || !state.engineReady;
+  updatePeopleField();
 }
 
 // ---------- recording ----------
@@ -590,6 +591,10 @@ async function stopRecording() {
   waveHistory = [...IDLE_WAVE];
   drawWave();
   await window.recio.finishMeeting(rec.id);
+  // "People on the other side" applies to this recording only: read it (it may
+  // have been corrected during the call), then reset it to Auto for the next one.
+  const people = $('people-count').value;
+  $('people-count').value = '';
   state.recording = null;
   updateDock();
   await refreshMeetings();
@@ -602,7 +607,7 @@ async function stopRecording() {
   const audio = rec.systemAudio;
   if (audio && !audio.failed && state.speakers.installed && finals.some((c) => c.source === 'system')) {
     // Separation first, then the summary, so the summary can use the labels.
-    queueSpeakerSeparation(rec.id, audio.offsetMs).finally(summarize);
+    queueSpeakerSeparation(rec.id, audio.offsetMs, people).finally(summarize);
   } else {
     if (audio) window.recio.discardAudio(rec.id).catch((e) => console.error(e.message));
     summarize();
@@ -612,8 +617,7 @@ async function stopRecording() {
 // ---------- speaker separation ----------
 // Runs in a worker in the main process; recordings stopped meanwhile wait in line.
 let speakerQueue = Promise.resolve();
-function queueSpeakerSeparation(id, offsetMs) {
-  const numSpeakers = $('speaker-count').value;
+function queueSpeakerSeparation(id, offsetMs, numSpeakers) {
   speakerQueue = speakerQueue.then(() => separateSpeakers(id, offsetMs, numSpeakers));
   return speakerQueue;
 }
@@ -667,6 +671,7 @@ async function refreshSpeakerStatus() {
   const sw = $('separate-speakers');
   // Until the models are there, the switch is off so no audio is saved for nothing.
   sw.disabled = !status.installed;
+  updatePeopleField();
   $('speakers-note').textContent = status.installed
     ? 'Runs on the processor after Stop (no graphics memory). The call audio is deleted right after.'
     : `Set up speaker separation first: a one-time ${status.downloadMb} MB download.`;
@@ -695,11 +700,12 @@ async function setupSpeakers() {
   }
 }
 
-// Blank, or a whole number 1–10 (anything else is cleared).
-function normalizeSpeakerCount() {
-  const el = $('speaker-count');
-  const n = Number(el.value);
-  if (el.value !== '' && !(Number.isInteger(n) && n >= 1 && n <= 10)) el.value = '';
+// "People on the other side" sits next to Start whenever the next (or current)
+// recording will be separated into speakers.
+function updatePeopleField() {
+  const rec = state.recording;
+  const usable = rec ? Boolean(rec.keepSystemAudio) && !rec.stopping : state.speakers.installed && $('separate-speakers').checked && $('use-system').checked;
+  $('people-field').hidden = !usable;
 }
 
 // ---------- summaries ----------
@@ -805,7 +811,7 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
-$('speaker-count').addEventListener('change', normalizeSpeakerCount);
+for (const id of ['separate-speakers', 'use-system']) $(id).addEventListener('change', updatePeopleField);
 for (const id of Object.values(settingFields)) $(id).addEventListener('change', saveSettings);
 
 window.recio.onAsrStatus(setEngineStatus);
