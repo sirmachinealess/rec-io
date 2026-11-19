@@ -1,5 +1,6 @@
 import { getMicrophone, getSystemAudio, startPcmCapture } from './capture.js';
 import { LocalAsrStream } from './local-asr.js';
+import { AudioBatcher } from './audio-batcher.js';
 import { TranscriptStore, formatTime } from './transcript.js';
 
 const $ = (id) => document.getElementById(id);
@@ -44,11 +45,12 @@ const ICONS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
   speaker: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>',
   download: '<path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/>',
+  pencil: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
 };
 
 // ---------- settings (remembered on this PC) ----------
 const SETTINGS_KEY = 'recio.settings';
-const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language' };
+const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language', separateSpeakers: 'separate-speakers' };
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -84,6 +86,9 @@ const state = {
   summary: { installed: false, downloadGb: '3.2', setupProgress: null },
   summarizing: null, // { id, label }
   summaryErrors: {}, // id -> message
+  speakers: { installed: false, downloadMb: 36, setupProgress: null },
+  diarizing: null, // { id, startedAt, estimateMs }
+  editingSpeaker: null, // { id, speaker } while a speaker name is being edited
   recording: null, // { id, startedAt, stops, store, timer, sourceStates, levels }
 };
 
@@ -154,7 +159,7 @@ async function refreshMeetings() {
 // ---------- shared pieces ----------
 function lineNode(c) {
   return h('div', { class: `line ${c.source}${c.isFinal === false ? ' partial' : ''}` },
-    h('span', { class: 'who' }, LABELS[c.source], h('span', { class: 't' }, formatTime(c.startMs))), c.text);
+    h('span', { class: 'who' }, c.speaker ?? LABELS[c.source], h('span', { class: 't' }, formatTime(c.startMs))), c.text);
 }
 const sectionLabel = (text) => h('div', { class: 'section-label' }, text);
 const badge = (iconPath, text, cls = '') => h('span', { class: `badge ${cls}` }, iconPath && icon(iconPath), text);
@@ -446,7 +451,9 @@ async function renderMeeting(id) {
   $('content').replaceChildren(
     h('article', { class: 'doc' }, head,
       h('div', { class: 'bento' },
+        diarizeStatus(id),
         summaryCards(meeting),
+        speakersCard(meeting),
         h('section', { class: 'card span-6' },
           h('details', { class: 'transcript', open: !meeting.summary || undefined },
             h('summary', {}, icon(ICONS.chevron), sectionLabel(`Transcript · ${chunks.length} ${chunks.length === 1 ? 'line' : 'lines'}`)),
@@ -495,14 +502,16 @@ function updateDock() {
   $('dock-hint').textContent = state.engineReady ? 'Ready' : 'Loading…';
   $('rec-live').hidden = !rec;
   $('new-recording').disabled = Boolean(rec) || !state.engineReady;
+  updatePeopleField();
 }
 
 // ---------- recording ----------
 async function startSource(rec, source, getStream) {
   const stream = await getStream();
+  const offsetMs = Date.now() - new Date(rec.startedAt).getTime();
   const asr = new LocalAsrStream({
     source,
-    offsetMs: Date.now() - new Date(rec.startedAt).getTime(),
+    offsetMs,
     getOptions: () => ({ language: $('language').value, prompt: $('vocabulary').value.trim() }),
     onStatus: (text) => setSourceState(source, text),
     onChunk: (chunk) => {
@@ -511,14 +520,35 @@ async function startSource(rec, source, getStream) {
       if (chunk.isFinal && chunk.text) window.recio.appendChunk(rec.id, chunk).catch((e) => console.error(e.message));
     },
   });
+  const batcher = source === 'system' && rec.keepSystemAudio ? keepSystemAudio(rec, offsetMs) : null;
   const stopCapture = await startPcmCapture(stream, (frame) => {
     showLevel(source, frameLevel(frame));
+    batcher?.push(frame);
     asr.push(frame);
   });
   return async () => {
     await stopCapture();
-    await asr.stop();
+    batcher?.flush();
+    await Promise.all([asr.stop(), rec.systemAudio?.writes]);
   };
+}
+
+// Speaker separation: the system channel is written to a temporary file in ~1 s
+// batches, in order. Sample 0 of the file is offsetMs after the recording start,
+// the same timeline the transcript chunks use. If a write fails, the file has a
+// gap and timestamps would drift, so the recording is marked and not separated.
+function keepSystemAudio(rec, offsetMs) {
+  const audio = { offsetMs, writes: Promise.resolve(), failed: false };
+  rec.systemAudio = audio;
+  return new AudioBatcher((pcm) => {
+    audio.writes = audio.writes.then(() => {
+      if (audio.failed) return;
+      return window.recio.appendAudio(rec.id, pcm).catch((err) => {
+        audio.failed = true;
+        console.error(`[speakers] could not keep system audio: ${err.message}`);
+      });
+    });
+  });
 }
 
 async function startRecording() {
@@ -528,7 +558,8 @@ async function startRecording() {
   const id = startedAt.replace(/[:.]/g, '-');
   const kind = $('recording-kind').value;
   await window.recio.createMeeting(id, startedAt, kind);
-  const rec = { id, startedAt, kind, stops: [], store: new TranscriptStore(), sourceStates: {}, levels: {} };
+  const keepAudio = $('use-system').checked && $('separate-speakers').checked && state.speakers.installed;
+  const rec = { id, startedAt, kind, keepSystemAudio: keepAudio, stops: [], store: new TranscriptStore(), sourceStates: {}, levels: {} };
   state.recording = rec;
   state.selectedId = id;
   $('rec-timer').textContent = '0:00';
@@ -562,11 +593,208 @@ async function stopRecording() {
   waveHistory = [...IDLE_WAVE];
   drawWave();
   await window.recio.finishMeeting(rec.id);
+  // "People on the other side" applies to this recording only: read it (it may
+  // have been corrected during the call), then reset it to Auto for the next one.
+  const people = $('people-count').value;
+  $('people-count').value = '';
   state.recording = null;
   updateDock();
   await refreshMeetings();
+  // The transcript is shown right away; speaker labels follow when separation ends.
   renderContent();
-  if (state.summary.installed && $('auto-summary').checked && rec.store.chunks.some((c) => c.isFinal && c.text)) runSummary(rec.id);
+  const finals = rec.store.chunks.filter((c) => c.isFinal && c.text);
+  const summarize = () => {
+    if (state.summary.installed && $('auto-summary').checked && finals.length) runSummary(rec.id);
+  };
+  const audio = rec.systemAudio;
+  if (audio && !audio.failed && state.speakers.installed && finals.some((c) => c.source === 'system')) {
+    // Separation first, then the summary, so the summary can use the labels.
+    queueSpeakerSeparation(rec.id, audio.offsetMs, people).finally(summarize);
+  } else {
+    if (audio) window.recio.discardAudio(rec.id).catch((e) => console.error(e.message));
+    summarize();
+  }
+}
+
+// ---------- speaker separation ----------
+// The recording page's "Speakers on the other side" card: rename a speaker or
+// merge one into another. Works on the saved labels only (no audio needed);
+// a merge can be undone. The summary uses the new names when it is re-run.
+function speakersCard(meeting) {
+  const { id } = meeting.meta;
+  const all = meeting.speakers ?? [];
+  if (!all.length) return null;
+  const shown = all.filter((s) => s.mergedInto === null);
+  const row = (s) => {
+    const editing = state.editingSpeaker?.id === id && state.editingSpeaker.speaker === s.id;
+    const stats = h('span', { class: 'stats' }, `${formatTime(s.ms)} · ${s.lines} ${s.lines === 1 ? 'line' : 'lines'}`);
+    const name = editing
+      ? h('form', { class: 'rename', onsubmit: (e) => { e.preventDefault(); saveSpeakerName(id, s.id, e.currentTarget.elements.name.value); } },
+          h('input', { name: 'name', value: s.named ? s.label : '', placeholder: s.label, maxlength: '40', 'aria-label': `New name for ${s.label}`, autocomplete: 'off',
+            onkeydown: (e) => { if (e.key === 'Escape') { e.stopPropagation(); cancelSpeakerEdit(id); } } }),
+          h('button', { class: 'btn btn-outline', type: 'submit' }, 'Save'),
+          h('button', { class: 'btn btn-ghost', type: 'button', onclick: () => cancelSpeakerEdit(id) }, 'Cancel'))
+      : h('span', { class: 'name' }, s.label);
+    const others = shown.filter((o) => o.id !== s.id);
+    const actions = !editing && h('span', { class: 'actions' },
+      iconButton(ICONS.pencil, `Rename ${s.label}`, () => editSpeaker(id, s.id)),
+      others.length > 0 && h('select', { 'aria-label': `Merge ${s.label} into another speaker`, onchange: (e) => mergeSpeakers(meeting, s.id, Number(e.currentTarget.value)) },
+        h('option', { value: '' }, 'Merge into…'),
+        others.map((o) => h('option', { value: String(o.id) }, o.label))));
+    const merged = s.merged.map((m) => h('li', { class: 'merged' }, `Includes Speaker ${m + 1}`,
+      h('button', { class: 'link', type: 'button', onclick: () => unmergeSpeaker(meeting, m) }, 'Separate again')));
+    return h('li', {}, h('div', { class: 'speaker-row' }, name, !editing && stats, actions), merged.length > 0 && h('ul', {}, merged));
+  };
+  return h('section', { class: 'card span-6 speakers-card' },
+    h('div', { class: 'card-top' }, sectionLabel(`Speakers on the other side · ${shown.length}`)),
+    h('p', { class: 'note' }, 'Wrong label? Rename a speaker, or merge two that are the same person. No audio is needed, and merges can be undone.'),
+    h('ul', { class: 'speaker-list' }, shown.map(row)));
+}
+
+function editSpeaker(id, speaker) {
+  state.editingSpeaker = { id, speaker };
+  renderContent();
+  requestAnimationFrame(() => document.querySelector('.speakers-card form.rename input')?.focus());
+}
+function cancelSpeakerEdit(id) {
+  state.editingSpeaker = null;
+  if (state.selectedId === id) renderContent();
+}
+
+// After a change: refresh the page. A rename is already in the summary (swapped
+// in place); after a merge, offer to re-run the summary with the new labels.
+async function afterSpeakerChange(id, message, { extra = [], resummarize = true } = {}) {
+  state.editingSpeaker = null;
+  await refreshMeetings();
+  if (state.selectedId === id) renderContent();
+  const hasSummary = state.meetings.find((m) => m.id === id)?.hasSummary;
+  if (!hasSummary) return toast(message, extra);
+  if (!resummarize) return toast(`${message.replace(/.$/, '')} in the transcript and summary.`, extra);
+  const action = state.summary.installed && !state.summarizing ? [['Re-summarize', () => runSummary(id)]] : [];
+  toast(`${message} Re-run the summary to use it.`, [...extra, ...action]);
+}
+
+async function saveSpeakerName(id, speaker, name) {
+  try {
+    await window.recio.renameSpeaker(id, speaker, name);
+  } catch (err) {
+    return toast(cleanError(err));
+  }
+  await afterSpeakerChange(id, name.trim() ? `Renamed to ${name.trim()}.` : 'Name reset.', { resummarize: false });
+}
+
+async function mergeSpeakers(meeting, from, into) {
+  const { id } = meeting.meta;
+  const label = (n) => meeting.speakers.find((s) => s.id === n)?.label;
+  try {
+    await window.recio.mergeSpeaker(id, from, into);
+  } catch (err) {
+    toast(cleanError(err));
+    return renderContent();
+  }
+  await afterSpeakerChange(id, `${label(from)} merged into ${label(into)}.`, { extra: [['Undo', () => unmergeSpeaker(meeting, from)]] });
+}
+
+async function unmergeSpeaker(meeting, speaker) {
+  const { id } = meeting.meta;
+  try {
+    await window.recio.unmergeSpeaker(id, speaker);
+  } catch (err) {
+    return toast(cleanError(err));
+  }
+  await afterSpeakerChange(id, `Speaker ${speaker + 1} is separate again.`);
+}
+
+// Runs in a worker in the main process; recordings stopped meanwhile wait in line.
+let speakerQueue = Promise.resolve();
+function queueSpeakerSeparation(id, offsetMs, numSpeakers) {
+  speakerQueue = speakerQueue.then(() => separateSpeakers(id, offsetMs, numSpeakers));
+  return speakerQueue;
+}
+
+async function separateSpeakers(id, offsetMs, numSpeakers) {
+  state.diarizing = { id, startedAt: Date.now(), estimateMs: null };
+  if (state.selectedId === id && !state.recording) renderContent();
+  const ticker = setInterval(updateDiarizeProgress, 500);
+  try {
+    const result = await window.recio.separateSpeakers(id, { offsetMs, numSpeakers });
+    if (result.speakers) toast(`Found ${result.speakers} ${result.speakers === 1 ? 'speaker' : 'speakers'} on the other side (took ${Math.max(1, Math.round(result.elapsedMs / 1000))} s).`);
+  } catch (err) {
+    toast(`Speaker separation failed: ${cleanError(err)}. The transcript is kept as it was.`);
+  } finally {
+    clearInterval(ticker);
+    state.diarizing = null;
+    if (state.selectedId === id && !state.recording) renderContent();
+  }
+}
+
+// Estimated progress (the engine reports none): elapsed time against an estimate
+// from the audio length, held below 95% until it really finishes.
+function diarizeProgress() {
+  const d = state.diarizing;
+  if (!d?.estimateMs) return { pct: 0, label: 'Separating speakers…' };
+  const elapsed = Date.now() - d.startedAt;
+  const pct = Math.min(95, Math.round((elapsed / d.estimateMs) * 100));
+  const left = Math.round((d.estimateMs - elapsed) / 1000);
+  return { pct, label: left > 5 ? `Separating speakers… about ${left < 90 ? `${left} s` : `${Math.round(left / 60)} min`} left` : 'Separating speakers… almost done' };
+}
+function updateDiarizeProgress() {
+  const bar = $('diarize-bar');
+  if (!bar) return;
+  const p = diarizeProgress();
+  bar.style.width = `${p.pct}%`;
+  $('diarize-label').textContent = p.label;
+}
+function diarizeStatus(id) {
+  if (state.diarizing?.id !== id) return null;
+  const p = diarizeProgress();
+  return h('section', { class: 'card span-6 diarize-status', role: 'status' },
+    h('div', { class: 'row' }, h('span', { class: 'spinner' }), h('span', { id: 'diarize-label' }, p.label)),
+    h('div', { class: 'bar' }, h('i', { id: 'diarize-bar', style: `width: ${p.pct}%` })),
+    h('small', {}, 'Runs on the processor; you can keep using rec.io. The call audio is deleted when this finishes.'));
+}
+
+async function refreshSpeakerStatus() {
+  const status = await window.recio.getSpeakerStatus();
+  Object.assign(state.speakers, { installed: status.installed, downloadMb: status.downloadMb });
+  const sw = $('separate-speakers');
+  // Until the models are there, the switch is off so no audio is saved for nothing.
+  sw.disabled = !status.installed;
+  updatePeopleField();
+  $('speakers-note').textContent = status.installed
+    ? 'Runs on the processor after Stop (no graphics memory). The call audio is deleted right after.'
+    : `Set up speaker separation first: a one-time ${status.downloadMb} MB download.`;
+  const p = state.speakers.setupProgress;
+  $('speakers-setup').replaceChildren(
+    status.installed
+      ? ''
+      : p
+        ? h('div', { style: 'display: grid; gap: 6px' }, h('div', { class: 'bar' }, h('i', { style: `width: ${p.pct}%` })), h('small', { class: 'note' }, `${p.label} · ${p.pct}%`))
+        : h('button', { class: 'btn btn-outline', type: 'button', onclick: setupSpeakers }, icon(ICONS.download), 'Set up speaker separation'),
+  );
+}
+
+async function setupSpeakers() {
+  state.speakers.setupProgress = { pct: 0, label: 'Starting download' };
+  await refreshSpeakerStatus();
+  try {
+    await window.recio.installSpeakers();
+    $('separate-speakers').checked = true;
+    saveSettings();
+  } catch (err) {
+    toast(`Setup failed: ${cleanError(err)}. Try again when you are online.`);
+  } finally {
+    state.speakers.setupProgress = null;
+    await refreshSpeakerStatus();
+  }
+}
+
+// "People on the other side" sits next to Start whenever the next (or current)
+// recording will be separated into speakers.
+function updatePeopleField() {
+  const rec = state.recording;
+  const usable = rec ? Boolean(rec.keepSystemAudio) && !rec.stopping : state.speakers.installed && $('separate-speakers').checked && $('use-system').checked;
+  $('people-field').hidden = !usable;
 }
 
 // ---------- summaries ----------
@@ -672,6 +900,7 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+for (const id of ['separate-speakers', 'use-system']) $(id).addEventListener('change', updatePeopleField);
 for (const id of Object.values(settingFields)) $(id).addEventListener('change', saveSettings);
 
 window.recio.onAsrStatus(setEngineStatus);
@@ -688,6 +917,16 @@ window.recio.onSummarySetupProgress((p) => {
 loadSettings();
 showKindHint();
 showTheme(await window.recio.getTheme());
-await Promise.all([refreshMeetings(), refreshSummaryStatus()]);
+window.recio.onDiarizeProgress(({ id, estimateMs }) => {
+  if (state.diarizing?.id !== id) return;
+  state.diarizing.estimateMs = estimateMs;
+  updateDiarizeProgress();
+});
+window.recio.onSpeakerSetupProgress((p) => {
+  state.speakers.setupProgress = p;
+  refreshSpeakerStatus();
+});
+
+await Promise.all([refreshMeetings(), refreshSummaryStatus(), refreshSpeakerStatus()]);
 setEngineStatus(await window.recio.getAsrStatus());
 if (state.meetings.length) selectMeeting(state.meetings[0].id);

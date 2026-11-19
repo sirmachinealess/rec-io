@@ -9,6 +9,9 @@ const { LlamaServer } = require('./llama-server');
 const { SummaryPack } = require('./summary-pack');
 const { summarizeTranscript } = require('./summarize');
 const { MeetingStore, LABELS } = require('./meetings');
+const { TempAudio } = require('./temp-audio');
+const { SpeakerPack } = require('./speaker-pack');
+const { Diarizer, parseSpeakerCount, estimateMs } = require('./diarize');
 
 // Installed: the engine ships in <install dir>/resources/local. Dev: ./local.
 const LOCAL_DIR = app.isPackaged ? path.join(process.resourcesPath, 'local') : path.join(__dirname, '..', 'local');
@@ -19,6 +22,10 @@ app.setPath('userData', path.join(app.getPath('appData'), 'rec.io'));
 const meetingsDir = path.join(app.getPath('userData'), 'meetings');
 const meetings = new MeetingStore(meetingsDir);
 const summaryPack = new SummaryPack(path.join(app.getPath('userData'), 'llm'));
+// System audio kept only until speaker separation has run (see temp-audio.js).
+const tempAudio = new TempAudio(path.join(app.getPath('userData'), 'tmp'));
+const speakerPack = new SpeakerPack(path.join(app.getPath('userData'), 'speakers'));
+const diarizer = new Diarizer();
 
 // Moves recordings saved as flat <id>.jsonl files by early versions into the
 // per-meeting layout. Logged to %APPDATA%\rec.io\migration-log.txt.
@@ -115,6 +122,10 @@ ipcMain.handle('asr:transcribe', async (_event, pcmBuffer, options) => {
 ipcMain.handle('meetings:create', (_event, id, startedAt, kind) => meetings.create(id, startedAt, kind === 'lesson' ? 'lesson' : 'meeting'));
 ipcMain.handle('meetings:append-chunk', (_event, id, chunk) => meetings.appendChunk(id, chunk));
 ipcMain.handle('meetings:finish', (_event, id) => meetings.finish(id));
+// Raw system-channel PCM for speaker separation; the renderer sends it only when
+// "Separate speakers" is on. The microphone is never written to disk.
+ipcMain.handle('meetings:append-audio', (_event, id, pcm) => tempAudio.append(id, pcm));
+ipcMain.handle('meetings:discard-audio', (_event, id) => tempAudio.remove(id));
 ipcMain.handle('meetings:list', () => meetings.list());
 ipcMain.handle('meetings:get', (_event, id) => meetings.get(id));
 ipcMain.handle('meetings:reveal', (_event, id) => {
@@ -187,7 +198,8 @@ ipcMain.handle('summary:install', async () => {
 ipcMain.handle('summary:run', async (_event, id, language, kind) => {
   if (!summaryPack.isInstalled()) throw new Error('Summaries are not set up yet');
   if (summaryBusy) throw new Error('A summary is already running');
-  const chunks = meetings.readChunks(id);
+  // With speaker labels and names, so action items can name "Alan" or "Speaker 2".
+  const chunks = meetings.labeledChunks(id);
   const summaryKind = kind || meetings.readMeta(id).kind || 'meeting';
   summaryBusy = true;
   const progress = (label) => send('summary:progress', { id, label });
@@ -210,7 +222,78 @@ ipcMain.handle('summary:run', async (_event, id, language, kind) => {
   }
 });
 
+// Removes system audio left behind by a crash or by closing the app mid-way.
+function cleanupTempAudio() {
+  try {
+    const removed = tempAudio.cleanup();
+    if (removed) console.log(`[temp-audio] removed ${removed} leftover file(s)`);
+  } catch (err) {
+    console.warn(`[temp-audio] cleanup failed: ${err.message}`);
+  }
+}
+
+// ---------- speaker separation ----------
+let speakerSetupBusy = false;
+
+ipcMain.handle('speakers:status', () => ({
+  installed: speakerPack.isInstalled(),
+  busy: speakerSetupBusy,
+  downloadMb: speakerPack.downloadMb,
+}));
+
+ipcMain.handle('speakers:install', async () => {
+  if (speakerSetupBusy) throw new Error('Speaker separation setup is already running');
+  speakerSetupBusy = true;
+  try {
+    await speakerPack.install((progress) => send('speakers:setup-progress', progress));
+  } finally {
+    speakerSetupBusy = false;
+  }
+});
+
+// Runs after Stop (never during a recording's capture): separates the speakers in
+// the recording's temporary system audio, then always deletes that audio.
+// Returns { speakers, turns, audioMs, elapsedMs }; turns are on the recording timeline.
+ipcMain.handle('diarize:run', async (_event, id, { offsetMs = 0, numSpeakers = '' } = {}) => {
+  const pcmFile = tempAudio.path(id);
+  try {
+    if (!speakerPack.isInstalled()) throw new Error('Speaker separation is not set up yet');
+    keepTestAudio(id, pcmFile);
+    const audioMs = fs.existsSync(pcmFile) ? Math.round(fs.statSync(pcmFile).size / 32) : 0;
+    send('diarize:progress', { id, estimateMs: estimateMs(audioMs) });
+    const result = await diarizer.run({
+      pcmFile,
+      offsetMs: Number(offsetMs) || 0,
+      numSpeakers: parseSpeakerCount(numSpeakers),
+      models: { segmentation: speakerPack.segmentationPath, embedding: speakerPack.embeddingPath },
+    });
+    if (result.turns.length) meetings.setSpeakerTurns(id, result.turns);
+    console.log(`[speakers] ${id}: ${result.speakers} speaker(s), ${result.turns.length} turns, ${Math.round(result.audioMs / 1000)} s audio in ${(result.elapsedMs / 1000).toFixed(1)} s`);
+    return result;
+  } finally {
+    tempAudio.remove(id);
+  }
+});
+
+// Manual fixes on the recording page; they work without audio. Each rewrites
+// the Markdown document; the summary picks the names up when it is re-run.
+ipcMain.handle('speakers:rename', (_event, id, speaker, name) => meetings.renameSpeaker(id, speaker, name));
+ipcMain.handle('speakers:merge', (_event, id, from, into) => meetings.mergeSpeaker(id, from, into));
+ipcMain.handle('speakers:unmerge', (_event, id, speaker) => meetings.unmergeSpeaker(id, speaker));
+
+// Developer aid for tuning (scripts/diarize-eval.mjs): with RECIO_KEEP_TEST_AUDIO
+// set to a folder, an unpackaged dev build copies the system audio there before
+// it is deleted. Installed builds ignore it, so users' audio is never kept.
+function keepTestAudio(id, pcmFile) {
+  const dir = process.env.RECIO_KEEP_TEST_AUDIO;
+  if (app.isPackaged || !dir || !fs.existsSync(pcmFile)) return;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(pcmFile, path.join(dir, `${id}-system.pcm`));
+  console.warn(`[speakers] dev: kept a copy of the test audio in ${dir}`);
+}
+
 app.whenReady().then(() => {
+  cleanupTempAudio();
   migrateOldMeetings();
   lockNetwork();
   createWindow();
@@ -221,4 +304,8 @@ app.whenReady().then(() => {
   });
 });
 app.on('window-all-closed', () => app.quit());
-app.on('will-quit', () => whisper.stop());
+app.on('will-quit', () => {
+  whisper.stop();
+  diarizer.cancel();
+  cleanupTempAudio();
+});

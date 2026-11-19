@@ -285,7 +285,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .dock .btn { min-height: 40px; padding: 0 18px; font-size: 14px; }
 
 /* ---------- Toast ---------- */
-.toast { position: fixed; right: 24px; bottom: 24px; max-width: 440px; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px; background: var(--solid); color: var(--on-solid); border-radius: 9999px; box-shadow: var(--shadow-float); z-index: 30; font-weight: 500; font-size: 13px; }
+.toast { position: fixed; right: 24px; bottom: 88px; max-width: 440px; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px; background: var(--solid); color: var(--on-solid); border-radius: 9999px; box-shadow: var(--shadow-float); z-index: 30; font-weight: 500; font-size: 13px; }
 .toast .msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast button { border: 0; background: rgba(255, 255, 255, 0.14); color: inherit; font-weight: 600; font-size: 12.5px; padding: 5px 11px; border-radius: 9999px; }
 @media (prefers-color-scheme: dark) { .toast button { background: rgba(15, 23, 42, 0.1); } }
@@ -301,3 +301,33 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
   .content { padding: 24px 22px 140px; }
   .span-3 { grid-column: span 6; }
 }
+
+/* Speaker separation progress, shown above the summary after Stop */
+.diarize-status { display: grid; gap: 8px; }
+.diarize-status .row { display: flex; align-items: center; gap: 12px; font-weight: 600; }
+.diarize-status small { font-size: 12px; color: var(--faint); }
+/* A switch that cannot be used yet (e.g. speaker separation before setup) shows as off. */
+.sw:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
+.sw input:disabled + .track { background: var(--border-strong); }
+.sw input:disabled + .track::after { left: 3px; }
+
+/* "People on the other side" next to Start */
+.people { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.people select { min-height: 32px; padding: 0 8px; border-radius: 9999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; }
+.people select:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* Speakers on the other side (recording page) */
+.speakers-card .note { margin-bottom: 10px; }
+.speaker-list, .speaker-list ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.speaker-list ul { padding: 2px 0 4px 14px; }
+.speaker-row { display: flex; align-items: center; gap: 12px; min-height: 40px; flex-wrap: wrap; }
+.speaker-row .name { font-weight: 600; color: var(--orange-text); }
+.speaker-row .stats { font-size: 12.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.speaker-row .actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.speaker-row select, .speaker-row input { min-height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
+.speaker-row .rename { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.speaker-row .rename input { flex: 1; min-width: 120px; max-width: 280px; }
+.speaker-row .rename .btn { min-height: 32px; padding: 0 12px; font-size: 13px; }
+.speaker-list .merged { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.link { border: 0; background: none; padding: 0; color: var(--blue-text); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }

@@ -1,10 +1,12 @@
 // Meeting storage. Each meeting has raw data in .data/<id>/ and one readable
 // document in the meetings folder, named after its topic once summarized:
 //   meetings/2026-10-20 21.08 – Release delay and launch pricing.md
-//   meetings/.data/<id>/{meta.json, transcript.jsonl, summary.json}
+//   meetings/.data/<id>/{meta.json, transcript.jsonl, summary.json, speakers.json}
+// speakers.json (optional) holds the speaker labels for the system channel; see speakers.js.
 const fs = require('node:fs');
 const path = require('node:path');
 const { toMarkdown } = require('./summary-format');
+const speakers = require('./speakers');
 
 const LABELS = { microphone: 'Me', system: 'Them' };
 const UNTITLED = 'Untitled recording';
@@ -51,7 +53,7 @@ function buildDocument(meta, summary, chunks) {
   const head = summary
     ? toMarkdown({ ...summary, title: meta.title || summary.title }, { date: subtitle }).trimEnd()
     : `# ${meta.title || UNTITLED}\n\n_${subtitle}_`;
-  const lines = chunks.map((c) => `**${LABELS[c.source] ?? c.source}** [${formatTime(c.startMs)}]: ${c.text}`);
+  const lines = chunks.map((c) => `**${c.speaker ?? LABELS[c.source] ?? c.source}** [${formatTime(c.startMs)}]: ${c.text}`);
   return `${head}\n\n---\n\n## Transcript\n\n${lines.join('\n\n') || '_Nothing was transcribed._'}\n`;
 }
 
@@ -98,6 +100,66 @@ class MeetingStore {
     }).sort((a, b) => a.startMs - b.startMs);
   }
 
+  // Chunks with speaker labels applied (system chunks get .speaker / .speakerId
+  // when speaker separation ran). Use this for anything people or the model read.
+  labeledChunks(id) {
+    return speakers.labelChunks(this.readChunks(id), this.readSpeakers(id));
+  }
+
+  readSpeakers(id) {
+    const file = path.join(this.dir(id), 'speakers.json');
+    try {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return data?.version === speakers.VERSION ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Written to a temporary file and renamed, so a crash never leaves half a file.
+  writeSpeakers(id, data) {
+    const file = path.join(this.dir(id), 'speakers.json');
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify(data, null, 2));
+    fs.renameSync(`${file}.tmp`, file);
+    return this.writeDocument(id);
+  }
+
+  // Result of speaker separation: turns on the recording timeline.
+  setSpeakerTurns(id, turns) {
+    return this.writeSpeakers(id, speakers.createSpeakers(this.readChunks(id), turns));
+  }
+
+  updateSpeakers(id, change) {
+    const data = this.readSpeakers(id);
+    if (!data) throw new Error('This recording has no separated speakers');
+    return this.writeSpeakers(id, change(data));
+  }
+
+  // Also puts the new name into an existing summary right away (and into the
+  // title, which names the document), so no re-run of the model is needed.
+  renameSpeaker(id, speaker, name) {
+    const before = this.readSpeakers(id);
+    if (!before) throw new Error('This recording has no separated speakers');
+    const after = speakers.renameSpeaker(before, speaker, name);
+    const from = speakers.speakerLabel(before, speaker);
+    const to = speakers.speakerLabel(after, speaker);
+    const summary = this.readSummary(id);
+    if (summary && from !== to) {
+      fs.writeFileSync(path.join(this.dir(id), 'summary.json'), JSON.stringify(speakers.replaceLabel(summary, from, to), null, 2));
+      const meta = this.readMeta(id);
+      if (meta.title) this.writeMeta({ ...meta, title: cleanTitle(speakers.replaceLabel(meta.title, from, to)) });
+    }
+    return this.writeSpeakers(id, after);
+  }
+
+  mergeSpeaker(id, from, into) {
+    return this.updateSpeakers(id, (d) => speakers.mergeSpeaker(d, from, into));
+  }
+
+  unmergeSpeaker(id, speaker) {
+    return this.updateSpeakers(id, (d) => speakers.unmergeSpeaker(d, speaker));
+  }
+
   readSummary(id) {
     const file = path.join(this.dir(id), 'summary.json');
     return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
@@ -124,7 +186,7 @@ class MeetingStore {
     let name = `${base}.md`;
     for (let n = 2; fs.existsSync(path.join(this.root, name)) && name !== meta.file; n++) name = `${base} (${n}).md`;
     fs.mkdirSync(this.root, { recursive: true });
-    fs.writeFileSync(path.join(this.root, name), buildDocument(meta, this.readSummary(id), this.readChunks(id)));
+    fs.writeFileSync(path.join(this.root, name), buildDocument(meta, this.readSummary(id), this.labeledChunks(id)));
     if (meta.file && meta.file !== name) fs.rmSync(path.join(this.root, meta.file), { force: true });
     const updated = { ...meta, file: name };
     this.writeMeta(updated);
@@ -142,9 +204,12 @@ class MeetingStore {
   get(id) {
     const summary = this.readSummary(id);
     const meta = this.readMeta(id);
+    const chunks = this.readChunks(id);
+    const speakerData = this.readSpeakers(id);
     return {
       meta,
-      chunks: this.readChunks(id),
+      chunks: speakers.labelChunks(chunks, speakerData),
+      speakers: speakers.speakerList(chunks, speakerData),
       summary,
       summaryMarkdown: summary ? toMarkdown({ ...summary, title: meta.title || summary.title }) : '',
     };

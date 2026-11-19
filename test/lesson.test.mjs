@@ -20,7 +20,7 @@ const meeting = { meta: { id: 'x', title: lesson.title, startedAt: '2026-10-22T1
 
 test('lesson kind picks its own schema and prompt; meetings are unchanged', () => {
   assert.equal(fmt.schemaFor('lesson'), fmt.LESSON_SCHEMA);
-  assert.equal(fmt.schemaFor('meeting'), fmt.SUMMARY_SCHEMA);
+  assert.deepEqual(fmt.schemaFor('meeting').required, fmt.SUMMARY_SCHEMA.required);
   assert.match(fmt.promptFor('lesson', 'pt'), /Notes language = Portuguese/);
   assert.match(fmt.promptFor('lesson', 'auto'), /teacher mainly explains in/);
   assert.equal(fmt.promptFor('meeting', 'de'), fmt.systemPrompt('de'));

@@ -49,6 +49,12 @@
       "artifactName": "rec.io-Setup-${version}.exe",
       "deleteAppDataOnUninstall": false
     },
-    "compression": "normal"
+    "compression": "normal",
+    "asarUnpack": [
+      "node_modules/sherpa-onnx-win-x64/**"
+    ]
+  },
+  "dependencies": {
+    "sherpa-onnx-node": "2.0.1"
   }
 }

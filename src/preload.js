@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('recio', {
   createMeeting: (id, startedAt, kind) => ipcRenderer.invoke('meetings:create', id, startedAt, kind),
   appendChunk: (id, chunk) => ipcRenderer.invoke('meetings:append-chunk', id, chunk),
   finishMeeting: (id) => ipcRenderer.invoke('meetings:finish', id),
+  appendAudio: (id, pcm) => ipcRenderer.invoke('meetings:append-audio', id, pcm),
+  discardAudio: (id) => ipcRenderer.invoke('meetings:discard-audio', id),
   listMeetings: () => ipcRenderer.invoke('meetings:list'),
   getMeeting: (id) => ipcRenderer.invoke('meetings:get', id),
   revealMeeting: (id) => ipcRenderer.invoke('meetings:reveal', id),
@@ -26,4 +28,13 @@ contextBridge.exposeInMainWorld('recio', {
   onSummarySetupProgress: on('summary:setup-progress'),
   summarize: (id, language, kind) => ipcRenderer.invoke('summary:run', id, language, kind),
   onSummaryProgress: on('summary:progress'),
+
+  getSpeakerStatus: () => ipcRenderer.invoke('speakers:status'),
+  installSpeakers: () => ipcRenderer.invoke('speakers:install'),
+  onSpeakerSetupProgress: on('speakers:setup-progress'),
+  separateSpeakers: (id, options) => ipcRenderer.invoke('diarize:run', id, options),
+  onDiarizeProgress: on('diarize:progress'),
+  renameSpeaker: (id, speaker, name) => ipcRenderer.invoke('speakers:rename', id, speaker, name),
+  mergeSpeaker: (id, from, into) => ipcRenderer.invoke('speakers:merge', id, from, into),
+  unmergeSpeaker: (id, speaker) => ipcRenderer.invoke('speakers:unmerge', id, speaker),
 });
