@@ -49,7 +49,7 @@ const ICONS = {
 
 // ---------- settings (remembered on this PC) ----------
 const SETTINGS_KEY = 'recio.settings';
-const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language', separateSpeakers: 'separate-speakers' };
+const settingFields = { recordingKind: 'recording-kind', useSystem: 'use-system', language: 'language', vocabulary: 'vocabulary', autoSummary: 'auto-summary', summaryLanguage: 'summary-language', separateSpeakers: 'separate-speakers', speakerCount: 'speaker-count' };
 function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
@@ -85,6 +85,9 @@ const state = {
   summary: { installed: false, downloadGb: '3.2', setupProgress: null },
   summarizing: null, // { id, label }
   summaryErrors: {}, // id -> message
+  speakers: { installed: false, downloadMb: 36, setupProgress: null },
+  diarizing: null, // { id, startedAt, estimateMs }
+  speakerResults: {}, // id -> { speakers, turns, audioMs, elapsedMs }
   recording: null, // { id, startedAt, stops, store, timer, sourceStates, levels }
 };
 
@@ -447,6 +450,7 @@ async function renderMeeting(id) {
   $('content').replaceChildren(
     h('article', { class: 'doc' }, head,
       h('div', { class: 'bento' },
+        diarizeStatus(id),
         summaryCards(meeting),
         h('section', { class: 'card span-6' },
           h('details', { class: 'transcript', open: !meeting.summary || undefined },
@@ -551,7 +555,7 @@ async function startRecording() {
   const id = startedAt.replace(/[:.]/g, '-');
   const kind = $('recording-kind').value;
   await window.recio.createMeeting(id, startedAt, kind);
-  const keepAudio = $('use-system').checked && $('separate-speakers').checked;
+  const keepAudio = $('use-system').checked && $('separate-speakers').checked && state.speakers.installed;
   const rec = { id, startedAt, kind, keepSystemAudio: keepAudio, stops: [], store: new TranscriptStore(), sourceStates: {}, levels: {} };
   state.recording = rec;
   state.selectedId = id;
@@ -586,13 +590,116 @@ async function stopRecording() {
   waveHistory = [...IDLE_WAVE];
   drawWave();
   await window.recio.finishMeeting(rec.id);
-  // Phase 2 runs speaker separation here; until then the audio is not kept.
-  if (rec.systemAudio) await window.recio.discardAudio(rec.id).catch((e) => console.error(e.message));
   state.recording = null;
   updateDock();
   await refreshMeetings();
+  // The transcript is shown right away; speaker labels follow when separation ends.
   renderContent();
-  if (state.summary.installed && $('auto-summary').checked && rec.store.chunks.some((c) => c.isFinal && c.text)) runSummary(rec.id);
+  const finals = rec.store.chunks.filter((c) => c.isFinal && c.text);
+  const summarize = () => {
+    if (state.summary.installed && $('auto-summary').checked && finals.length) runSummary(rec.id);
+  };
+  const audio = rec.systemAudio;
+  if (audio && !audio.failed && state.speakers.installed && finals.some((c) => c.source === 'system')) {
+    // Separation first, then the summary, so the summary can use the labels.
+    queueSpeakerSeparation(rec.id, audio.offsetMs).finally(summarize);
+  } else {
+    if (audio) window.recio.discardAudio(rec.id).catch((e) => console.error(e.message));
+    summarize();
+  }
+}
+
+// ---------- speaker separation ----------
+// Runs in a worker in the main process; recordings stopped meanwhile wait in line.
+let speakerQueue = Promise.resolve();
+function queueSpeakerSeparation(id, offsetMs) {
+  const numSpeakers = $('speaker-count').value;
+  speakerQueue = speakerQueue.then(() => separateSpeakers(id, offsetMs, numSpeakers));
+  return speakerQueue;
+}
+
+async function separateSpeakers(id, offsetMs, numSpeakers) {
+  state.diarizing = { id, startedAt: Date.now(), estimateMs: null };
+  if (state.selectedId === id && !state.recording) renderContent();
+  const ticker = setInterval(updateDiarizeProgress, 500);
+  try {
+    const result = await window.recio.separateSpeakers(id, { offsetMs, numSpeakers });
+    state.speakerResults[id] = result; // Phase 3 puts these onto the transcript.
+    if (result.speakers) toast(`Found ${result.speakers} ${result.speakers === 1 ? 'speaker' : 'speakers'} on the other side (took ${Math.max(1, Math.round(result.elapsedMs / 1000))} s).`);
+  } catch (err) {
+    toast(`Speaker separation failed: ${cleanError(err)}. The transcript is kept as it was.`);
+  } finally {
+    clearInterval(ticker);
+    state.diarizing = null;
+    if (state.selectedId === id && !state.recording) renderContent();
+  }
+}
+
+// Estimated progress (the engine reports none): elapsed time against an estimate
+// from the audio length, held below 95% until it really finishes.
+function diarizeProgress() {
+  const d = state.diarizing;
+  if (!d?.estimateMs) return { pct: 0, label: 'Separating speakers…' };
+  const elapsed = Date.now() - d.startedAt;
+  const pct = Math.min(95, Math.round((elapsed / d.estimateMs) * 100));
+  const left = Math.round((d.estimateMs - elapsed) / 1000);
+  return { pct, label: left > 5 ? `Separating speakers… about ${left < 90 ? `${left} s` : `${Math.round(left / 60)} min`} left` : 'Separating speakers… almost done' };
+}
+function updateDiarizeProgress() {
+  const bar = $('diarize-bar');
+  if (!bar) return;
+  const p = diarizeProgress();
+  bar.style.width = `${p.pct}%`;
+  $('diarize-label').textContent = p.label;
+}
+function diarizeStatus(id) {
+  if (state.diarizing?.id !== id) return null;
+  const p = diarizeProgress();
+  return h('section', { class: 'card span-6 diarize-status', role: 'status' },
+    h('div', { class: 'row' }, h('span', { class: 'spinner' }), h('span', { id: 'diarize-label' }, p.label)),
+    h('div', { class: 'bar' }, h('i', { id: 'diarize-bar', style: `width: ${p.pct}%` })),
+    h('small', {}, 'Runs on the processor; you can keep using rec.io. The call audio is deleted when this finishes.'));
+}
+
+async function refreshSpeakerStatus() {
+  const status = await window.recio.getSpeakerStatus();
+  Object.assign(state.speakers, { installed: status.installed, downloadMb: status.downloadMb });
+  const sw = $('separate-speakers');
+  // Until the models are there, the switch is off so no audio is saved for nothing.
+  sw.disabled = !status.installed;
+  $('speakers-note').textContent = status.installed
+    ? 'Runs on the processor after Stop (no graphics memory). The call audio is deleted right after.'
+    : `Set up speaker separation first: a one-time ${status.downloadMb} MB download.`;
+  const p = state.speakers.setupProgress;
+  $('speakers-setup').replaceChildren(
+    status.installed
+      ? ''
+      : p
+        ? h('div', { style: 'display: grid; gap: 6px' }, h('div', { class: 'bar' }, h('i', { style: `width: ${p.pct}%` })), h('small', { class: 'note' }, `${p.label} · ${p.pct}%`))
+        : h('button', { class: 'btn btn-outline', type: 'button', onclick: setupSpeakers }, icon(ICONS.download), 'Set up speaker separation'),
+  );
+}
+
+async function setupSpeakers() {
+  state.speakers.setupProgress = { pct: 0, label: 'Starting download' };
+  await refreshSpeakerStatus();
+  try {
+    await window.recio.installSpeakers();
+    $('separate-speakers').checked = true;
+    saveSettings();
+  } catch (err) {
+    toast(`Setup failed: ${cleanError(err)}. Try again when you are online.`);
+  } finally {
+    state.speakers.setupProgress = null;
+    await refreshSpeakerStatus();
+  }
+}
+
+// Blank, or a whole number 1–10 (anything else is cleared).
+function normalizeSpeakerCount() {
+  const el = $('speaker-count');
+  const n = Number(el.value);
+  if (el.value !== '' && !(Number.isInteger(n) && n >= 1 && n <= 10)) el.value = '';
 }
 
 // ---------- summaries ----------
@@ -698,6 +805,7 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+$('speaker-count').addEventListener('change', normalizeSpeakerCount);
 for (const id of Object.values(settingFields)) $(id).addEventListener('change', saveSettings);
 
 window.recio.onAsrStatus(setEngineStatus);
@@ -714,6 +822,16 @@ window.recio.onSummarySetupProgress((p) => {
 loadSettings();
 showKindHint();
 showTheme(await window.recio.getTheme());
-await Promise.all([refreshMeetings(), refreshSummaryStatus()]);
+window.recio.onDiarizeProgress(({ id, estimateMs }) => {
+  if (state.diarizing?.id !== id) return;
+  state.diarizing.estimateMs = estimateMs;
+  updateDiarizeProgress();
+});
+window.recio.onSpeakerSetupProgress((p) => {
+  state.speakers.setupProgress = p;
+  refreshSpeakerStatus();
+});
+
+await Promise.all([refreshMeetings(), refreshSummaryStatus(), refreshSpeakerStatus()]);
 setEngineStatus(await window.recio.getAsrStatus());
 if (state.meetings.length) selectMeeting(state.meetings[0].id);

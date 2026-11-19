@@ -10,6 +10,8 @@ const { SummaryPack } = require('./summary-pack');
 const { summarizeTranscript } = require('./summarize');
 const { MeetingStore, LABELS } = require('./meetings');
 const { TempAudio } = require('./temp-audio');
+const { SpeakerPack } = require('./speaker-pack');
+const { Diarizer, parseSpeakerCount, estimateMs } = require('./diarize');
 
 // Installed: the engine ships in <install dir>/resources/local. Dev: ./local.
 const LOCAL_DIR = app.isPackaged ? path.join(process.resourcesPath, 'local') : path.join(__dirname, '..', 'local');
@@ -22,6 +24,8 @@ const meetings = new MeetingStore(meetingsDir);
 const summaryPack = new SummaryPack(path.join(app.getPath('userData'), 'llm'));
 // System audio kept only until speaker separation has run (see temp-audio.js).
 const tempAudio = new TempAudio(path.join(app.getPath('userData'), 'tmp'));
+const speakerPack = new SpeakerPack(path.join(app.getPath('userData'), 'speakers'));
+const diarizer = new Diarizer();
 
 // Moves recordings saved as flat <id>.jsonl files by early versions into the
 // per-meeting layout. Logged to %APPDATA%\rec.io\migration-log.txt.
@@ -227,6 +231,59 @@ function cleanupTempAudio() {
   }
 }
 
+// ---------- speaker separation ----------
+let speakerSetupBusy = false;
+
+ipcMain.handle('speakers:status', () => ({
+  installed: speakerPack.isInstalled(),
+  busy: speakerSetupBusy,
+  downloadMb: speakerPack.downloadMb,
+}));
+
+ipcMain.handle('speakers:install', async () => {
+  if (speakerSetupBusy) throw new Error('Speaker separation setup is already running');
+  speakerSetupBusy = true;
+  try {
+    await speakerPack.install((progress) => send('speakers:setup-progress', progress));
+  } finally {
+    speakerSetupBusy = false;
+  }
+});
+
+// Runs after Stop (never during a recording's capture): separates the speakers in
+// the recording's temporary system audio, then always deletes that audio.
+// Returns { speakers, turns, audioMs, elapsedMs }; turns are on the recording timeline.
+ipcMain.handle('diarize:run', async (_event, id, { offsetMs = 0, numSpeakers = '' } = {}) => {
+  const pcmFile = tempAudio.path(id);
+  try {
+    if (!speakerPack.isInstalled()) throw new Error('Speaker separation is not set up yet');
+    keepTestAudio(id, pcmFile);
+    const audioMs = fs.existsSync(pcmFile) ? Math.round(fs.statSync(pcmFile).size / 32) : 0;
+    send('diarize:progress', { id, estimateMs: estimateMs(audioMs) });
+    const result = await diarizer.run({
+      pcmFile,
+      offsetMs: Number(offsetMs) || 0,
+      numSpeakers: parseSpeakerCount(numSpeakers),
+      models: { segmentation: speakerPack.segmentationPath, embedding: speakerPack.embeddingPath },
+    });
+    console.log(`[speakers] ${id}: ${result.speakers} speaker(s), ${result.turns.length} turns, ${Math.round(result.audioMs / 1000)} s audio in ${(result.elapsedMs / 1000).toFixed(1)} s`);
+    return result;
+  } finally {
+    tempAudio.remove(id);
+  }
+});
+
+// Developer aid for tuning (scripts/diarize-eval.mjs): with RECIO_KEEP_TEST_AUDIO
+// set to a folder, an unpackaged dev build copies the system audio there before
+// it is deleted. Installed builds ignore it, so users' audio is never kept.
+function keepTestAudio(id, pcmFile) {
+  const dir = process.env.RECIO_KEEP_TEST_AUDIO;
+  if (app.isPackaged || !dir || !fs.existsSync(pcmFile)) return;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(pcmFile, path.join(dir, `${id}-system.pcm`));
+  console.warn(`[speakers] dev: kept a copy of the test audio in ${dir}`);
+}
+
 app.whenReady().then(() => {
   cleanupTempAudio();
   migrateOldMeetings();
@@ -241,5 +298,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => {
   whisper.stop();
+  diarizer.cancel();
   cleanupTempAudio();
 });

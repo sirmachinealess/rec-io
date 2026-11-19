@@ -301,3 +301,12 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
   .content { padding: 24px 22px 140px; }
   .span-3 { grid-column: span 6; }
 }
+
+/* Speaker separation progress, shown above the summary after Stop */
+.diarize-status { display: grid; gap: 8px; }
+.diarize-status .row { display: flex; align-items: center; gap: 12px; font-weight: 600; }
+.diarize-status small { font-size: 12px; color: var(--faint); }
+/* A switch that cannot be used yet (e.g. speaker separation before setup) shows as off. */
+.sw:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
+.sw input:disabled + .track { background: var(--border-strong); }
+.sw input:disabled + .track::after { left: 3px; }

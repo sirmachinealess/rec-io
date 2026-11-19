@@ -28,4 +28,10 @@ contextBridge.exposeInMainWorld('recio', {
   onSummarySetupProgress: on('summary:setup-progress'),
   summarize: (id, language, kind) => ipcRenderer.invoke('summary:run', id, language, kind),
   onSummaryProgress: on('summary:progress'),
+
+  getSpeakerStatus: () => ipcRenderer.invoke('speakers:status'),
+  installSpeakers: () => ipcRenderer.invoke('speakers:install'),
+  onSpeakerSetupProgress: on('speakers:setup-progress'),
+  separateSpeakers: (id, options) => ipcRenderer.invoke('diarize:run', id, options),
+  onDiarizeProgress: on('diarize:progress'),
 });
